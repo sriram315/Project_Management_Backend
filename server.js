@@ -26,7 +26,7 @@ const swaggerOptions = {
     },
     servers: [
       {
-        url: 'http://localhost:5000',
+        url: 'http://72.60.101.240:5005',
         description: 'Development server'
       }
     ],
@@ -581,7 +581,7 @@ app.get('/api/projects', (req, res) => {
  *                 example: "Complete redesign of company website"
  *               budget:
  *                 type: number
- *                 example: 50000
+ *                 example: 50050
  *               estimated_hours:
  *                 type: integer
  *                 example: 200
