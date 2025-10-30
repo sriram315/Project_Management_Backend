@@ -1,9 +1,9 @@
-const express = require('express');
-const cors = require('cors');
-const mysql = require('mysql2');
-const path = require('path');
-const swaggerJsdoc = require('swagger-jsdoc');
-const swaggerUi = require('swagger-ui-express');
+const express = require("express");
+const cors = require("cors");
+const mysql = require("mysql2");
+const path = require("path");
+const swaggerJsdoc = require("swagger-jsdoc");
+const swaggerUi = require("swagger-ui-express");
 
 const app = express();
 
@@ -14,124 +14,141 @@ app.use(express.json());
 // Swagger configuration
 const swaggerOptions = {
   definition: {
-    openapi: '3.0.0',
+    openapi: "3.0.0",
     info: {
-      title: 'Project Management API',
-      version: '1.0.0',
-      description: 'API documentation for Project Management System',
+      title: "Project Management API",
+      version: "1.0.0",
+      description: "API documentation for Project Management System",
       contact: {
-        name: 'API Support',
-        email: 'support@example.com'
-      }
+        name: "API Support",
+        email: "support@example.com",
+      },
     },
     servers: [
       {
-        url: 'http://72.60.101.240:5005',
-        description: 'Development server'
-      }
+        url: "http://72.60.101.240/:5005",
+        description: "Development server",
+      },
     ],
     components: {
       schemas: {
         User: {
-          type: 'object',
+          type: "object",
           properties: {
-            id: { type: 'integer' },
-            username: { type: 'string' },
-            password: { type: 'string' },
-            role: { type: 'string', enum: ['admin', 'manager', 'team_lead', 'employee'] },
-            email: { type: 'string', format: 'email' },
-            available_hours_per_week: { type: 'integer', default: 40 }
-          }
+            id: { type: "integer" },
+            username: { type: "string" },
+            password: { type: "string" },
+            role: {
+              type: "string",
+              enum: ["admin", "manager", "team_lead", "employee"],
+            },
+            email: { type: "string", format: "email" },
+            available_hours_per_week: { type: "integer", default: 40 },
+          },
         },
         Project: {
-          type: 'object',
+          type: "object",
           properties: {
-            id: { type: 'integer' },
-            name: { type: 'string' },
-            description: { type: 'string' },
-            budget: { type: 'number' },
-            estimated_hours: { type: 'integer' },
-            start_date: { type: 'string', format: 'date' },
-            end_date: { type: 'string', format: 'date' },
-            status: { type: 'string', enum: ['active', 'completed', 'on_hold', 'cancelled'] },
-            progress: { type: 'integer', minimum: 0, maximum: 100 }
-          }
+            id: { type: "integer" },
+            name: { type: "string" },
+            description: { type: "string" },
+            budget: { type: "number" },
+            estimated_hours: { type: "integer" },
+            start_date: { type: "string", format: "date" },
+            end_date: { type: "string", format: "date" },
+            status: {
+              type: "string",
+              enum: ["active", "completed", "on_hold", "cancelled"],
+            },
+            progress: { type: "integer", minimum: 0, maximum: 100 },
+          },
         },
         Task: {
-          type: 'object',
+          type: "object",
           properties: {
-            id: { type: 'integer' },
-            name: { type: 'string' },
-            description: { type: 'string' },
-            assignee_id: { type: 'integer' },
-            project_id: { type: 'integer' },
-            planned_hours: { type: 'number' },
-            actual_hours: { type: 'number' },
-            priority: { type: 'string', enum: ['low', 'medium', 'high', 'urgent'] },
-            task_type: { type: 'string' },
-            due_date: { type: 'string', format: 'date' },
-            status: { type: 'string', enum: ['todo', 'in_progress', 'completed', 'blocked'] },
-            attachments: { type: 'string' }
-          }
+            id: { type: "integer" },
+            name: { type: "string" },
+            description: { type: "string" },
+            assignee_id: { type: "integer" },
+            project_id: { type: "integer" },
+            planned_hours: { type: "number" },
+            actual_hours: { type: "number" },
+            priority: {
+              type: "string",
+              enum: ["low", "medium", "high", "urgent"],
+            },
+            task_type: { type: "string" },
+            due_date: { type: "string", format: "date" },
+            status: {
+              type: "string",
+              enum: ["todo", "in_progress", "completed", "blocked"],
+            },
+            attachments: { type: "string" },
+          },
         },
         TeamMember: {
-          type: 'object',
+          type: "object",
           properties: {
-            id: { type: 'integer' },
-            name: { type: 'string' },
-            role: { type: 'string' },
-            email: { type: 'string', format: 'email' },
-            available_hours_per_week: { type: 'integer' },
-            status: { type: 'string', enum: ['online', 'offline', 'busy'] },
-            projects: { type: 'string' },
-            allocated_hours: { type: 'integer' }
-          }
+            id: { type: "integer" },
+            name: { type: "string" },
+            role: { type: "string" },
+            email: { type: "string", format: "email" },
+            available_hours_per_week: { type: "integer" },
+            status: { type: "string", enum: ["online", "offline", "busy"] },
+            projects: { type: "string" },
+            allocated_hours: { type: "integer" },
+          },
         },
         Error: {
-          type: 'object',
+          type: "object",
           properties: {
-            message: { type: 'string' },
-            error: { type: 'string' }
-          }
-        }
-      }
-    }
+            message: { type: "string" },
+            error: { type: "string" },
+          },
+        },
+      },
+    },
   },
-  apis: ['./server.js'] // Path to the API files
+  apis: ["./server.js"], // Path to the API files
 };
 
 const swaggerSpec = swaggerJsdoc(swaggerOptions);
 
 // Swagger UI setup
-app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec, {
-  explorer: true,
-  customCss: '.swagger-ui .topbar { display: none }',
-  customSiteTitle: 'Project Management API Documentation'
-}));
+app.use(
+  "/api-docs",
+  swaggerUi.serve,
+  swaggerUi.setup(swaggerSpec, {
+    explorer: true,
+    customCss: ".swagger-ui .topbar { display: none }",
+    customSiteTitle: "Project Management API Documentation",
+  })
+);
 
 // Database connection pool
 const pool = mysql.createPool({
-    host: '217.21.90.204',
-    user: 'u635298195_pmp',
-    password: '>1BC/=Nf1',
-    database: 'u635298195_pmp',
-    port: 3306,
-    waitForConnections: true,
-    connectionLimit: 10,
-    queueLimit: 0,
-    acquireTimeout: 60000,
-    timeout: 60000
+  host: "217.21.90.204",
+  user: "u635298195_pmp",
+  password: ">1BC/=Nf1",
+  database: "u635298195_pmp",
+  port: 3306,
+  charset: "utf8mb4", // Support for all Unicode characters including emojis
+  waitForConnections: true,
+  connectionLimit: 10,
+  queueLimit: 0,
+  acquireTimeout: 60000,
+  timeout: 60000,
 });
 
 // Test connection
 pool.getConnection((err, connection) => {
-    if (err) {
-        console.error('Database connection failed:', err.message);
-        console.log('Using mock data fallback...');
-    } else {
-        console.log('Successfully connected to MySQL database!');
-        connection.release();
-    }
+  if (err) {
+    console.error("Database connection failed:", err.message);
+    console.log("Using mock data fallback...");
+  } else {
+    console.log("Successfully connected to MySQL database!");
+    connection.release();
+  }
 });
 
 // Test route
@@ -154,8 +171,8 @@ pool.getConnection((err, connection) => {
  *                   type: string
  *                   example: "Backend is working!"
  */
-app.get('/api/test', (req, res) => {
-    res.json({ message: 'Backend is working!' });
+app.get("/api/test", (req, res) => {
+  res.json({ message: "Backend is working!" });
 });
 
 // User Routes
@@ -209,27 +226,27 @@ app.get('/api/test', (req, res) => {
  *             schema:
  *               $ref: '#/components/schemas/Error'
  */
-app.post('/api/auth/login', (req, res) => {
-    const { username, password } = req.body;
-    
-    const query = 'SELECT * FROM users WHERE username = ? AND password = ?';
-    
-    pool.execute(query, [username, password], (err, results) => {
-        if (err) {
-            console.error('Login error:', err);
-            return res.status(500).json({ message: 'Database error' });
-        }
-        
-        if (results.length === 0) {
-            return res.status(401).json({ message: 'Invalid credentials' });
-        }
+app.post("/api/auth/login", (req, res) => {
+  const { username, password } = req.body;
 
-        res.json({
-            id: results[0].id,
-            username: results[0].username,
-            role: results[0].role
-        });
+  const query = "SELECT * FROM users WHERE username = ? AND password = ?";
+
+  pool.execute(query, [username, password], (err, results) => {
+    if (err) {
+      console.error("Login error:", err);
+      return res.status(500).json({ message: "Database error" });
+    }
+
+    if (results.length === 0) {
+      return res.status(401).json({ message: "Invalid credentials" });
+    }
+
+    res.json({
+      id: results[0].id,
+      username: results[0].username,
+      role: results[0].role,
     });
+  });
 });
 
 // Get all users
@@ -256,16 +273,16 @@ app.post('/api/auth/login', (req, res) => {
  *             schema:
  *               $ref: '#/components/schemas/Error'
  */
-app.get('/api/users', (req, res) => {
-    const query = 'SELECT * FROM users ORDER BY username';
-    
-    pool.execute(query, (err, results) => {
-        if (err) {
-            console.error('Users fetch error:', err);
-            return res.status(500).json({ message: 'Database error' });
-        }
-        res.json(results);
-    });
+app.get("/api/users", (req, res) => {
+  const query = "SELECT * FROM users ORDER BY username";
+
+  pool.execute(query, (err, results) => {
+    if (err) {
+      console.error("Users fetch error:", err);
+      return res.status(500).json({ message: "Database error" });
+    }
+    res.json(results);
+  });
 });
 
 // Add new user
@@ -325,18 +342,86 @@ app.get('/api/users', (req, res) => {
  *             schema:
  *               $ref: '#/components/schemas/Error'
  */
-app.post('/api/users', (req, res) => {
-    const { username, password, role, email, available_hours_per_week } = req.body;
-    
-    const query = 'INSERT INTO users (username, password, role, email, available_hours_per_week) VALUES (?, ?, ?, ?, ?)';
-    
-    pool.execute(query, [username, password, role, email, available_hours_per_week || 40], (err, results) => {
+app.post("/api/users", (req, res) => {
+  const { username, password, role, email, available_hours_per_week } =
+    req.body;
+
+  // First, check if username or email already exists
+  const checkQuery =
+    "SELECT id, username, email FROM users WHERE username = ? OR email = ?";
+
+  pool.execute(checkQuery, [username, email], (checkErr, checkResults) => {
+    if (checkErr) {
+      console.error("Duplicate check error:", checkErr);
+      return res
+        .status(500)
+        .json({ message: "Database error while checking duplicates" });
+    }
+
+    // Check for duplicate username
+    const duplicateUsername = checkResults.find(
+      (user) => user.username === username
+    );
+    if (duplicateUsername) {
+      return res.status(400).json({
+        message: `Username "${username}" already exists. Please use a different username.`,
+        field: "username",
+        type: "duplicate_username",
+      });
+    }
+
+    // Check for duplicate email
+    const duplicateEmail = checkResults.find((user) => user.email === email);
+    if (duplicateEmail) {
+      return res.status(400).json({
+        message: `Email "${email}" already exists. Please use a different email address.`,
+        field: "email",
+        type: "duplicate_email",
+      });
+    }
+
+    // If no duplicates, proceed with insert
+    const insertQuery =
+      "INSERT INTO users (username, password, role, email, available_hours_per_week) VALUES (?, ?, ?, ?, ?)";
+
+    pool.execute(
+      insertQuery,
+      [username, password, role, email, available_hours_per_week || 40],
+      (err, results) => {
         if (err) {
-            console.error('Add user error:', err);
-            return res.status(500).json({ message: 'Database error' });
+          console.error("Add user error:", err);
+
+          // Handle duplicate key errors as fallback
+          if (err.code === "ER_DUP_ENTRY") {
+            if (err.sqlMessage.includes("username")) {
+              return res.status(400).json({
+                message: `Username "${username}" already exists. Please use a different username.`,
+                field: "username",
+                type: "duplicate_username",
+              });
+            } else if (err.sqlMessage.includes("email")) {
+              return res.status(400).json({
+                message: `Email "${email}" already exists. Please use a different email address.`,
+                field: "email",
+                type: "duplicate_email",
+              });
+            }
+          }
+
+          return res.status(500).json({
+            message: "Failed to create user. Please try again.",
+            error: err.message,
+          });
         }
-        res.json({ id: results.insertId, message: 'User added successfully' });
-    });
+
+        res.json({
+          id: results.insertId,
+          message: "User created successfully",
+          username: username,
+        });
+      }
+    );
+  });
 });
 
 // Update user
@@ -392,19 +477,50 @@ app.post('/api/users', (req, res) => {
  *             schema:
  *               $ref: '#/components/schemas/Error'
  */
-app.put('/api/users/:id', (req, res) => {
-    const { id } = req.params;
-    const { username, email, role, available_hours_per_week } = req.body;
-    
-    const query = 'UPDATE users SET username = ?, email = ?, role = ?, available_hours_per_week = ? WHERE id = ?';
-    
-    pool.execute(query, [username, email, role, available_hours_per_week || 40, id], (err, results) => {
+app.put("/api/users/:id", (req, res) => {
+  const { id } = req.params;
+  const { username, email, role, available_hours_per_week } = req.body;
+
+  // First, check if email already exists for a different user
+  const checkEmailQuery = "SELECT id FROM users WHERE email = ? AND id != ?";
+
+  pool.execute(checkEmailQuery, [email, id], (checkErr, checkResults) => {
+    if (checkErr) {
+      console.error("Email check error:", checkErr);
+      return res.status(500).json({ message: "Database error" });
+    }
+
+    if (checkResults.length > 0) {
+      return res.status(400).json({
+        message: "Email already exists. Please use a different email address.",
+        field: "email",
+      });
+    }
+
+    // If email is unique or unchanged, proceed with update
+    const updateQuery =
+      "UPDATE users SET username = ?, email = ?, role = ?, available_hours_per_week = ? WHERE id = ?";
+
+    pool.execute(
+      updateQuery,
+      [username, email, role, available_hours_per_week || 40, id],
+      (err, results) => {
         if (err) {
-            console.error('Update user error:', err);
-            return res.status(500).json({ message: 'Database error' });
+          console.error("Update user error:", err);
+          // Check if it's a duplicate key error for email
+          if (err.code === "ER_DUP_ENTRY" && err.sqlMessage.includes("email")) {
+            return res.status(400).json({
+              message:
+                "Email already exists. Please use a different email address.",
+              field: "email",
+            });
+          }
+          return res.status(500).json({ message: "Database error" });
         }
-        res.json({ message: 'User updated successfully' });
-    });
+        res.json({ message: "User updated successfully" });
+      }
+    );
+  });
 });
 
 // Delete user
@@ -439,18 +555,18 @@ app.put('/api/users/:id', (req, res) => {
  *             schema:
  *               $ref: '#/components/schemas/Error'
  */
-app.delete('/api/users/:id', (req, res) => {
-    const { id } = req.params;
-    
-    const query = 'DELETE FROM users WHERE id = ?';
-    
-    pool.execute(query, [id], (err, results) => {
-        if (err) {
-            console.error('Delete user error:', err);
-            return res.status(500).json({ message: 'Database error' });
-        }
-        res.json({ message: 'User deleted successfully' });
-    });
+app.delete("/api/users/:id", (req, res) => {
+  const { id } = req.params;
+
+  const query = "DELETE FROM users WHERE id = ?";
+
+  pool.execute(query, [id], (err, results) => {
+    if (err) {
+      console.error("Delete user error:", err);
+      return res.status(500).json({ message: "Database error" });
+    }
+    res.json({ message: "User deleted successfully" });
+  });
 });
 
 // Team Routes - Get all team members (now using users table directly)
@@ -477,8 +593,8 @@ app.delete('/api/users/:id', (req, res) => {
  *             schema:
  *               $ref: '#/components/schemas/Error'
  */
-app.get('/api/team', (req, res) => {
-    const query = `
+app.get("/api/team", (req, res) => {
+  const query = `
         SELECT 
             u.id,
             u.username as name,
@@ -495,29 +611,38 @@ app.get('/api/team', (req, res) => {
         GROUP BY u.id
         ORDER BY u.username
     `;
-    
-    pool.execute(query, (err, results) => {
-        if (err) {
-            console.error('Team fetch error:', err);
-            return res.status(500).json({ message: 'Database error' });
-        }
-        res.json(results);
-    });
+
+  pool.execute(query, (err, results) => {
+    if (err) {
+      console.error("Team fetch error:", err);
+      return res.status(500).json({ message: "Database error" });
+    }
+    res.json(results);
+  });
 });
 
 // Add new team member (now creates user directly)
-app.post('/api/team', (req, res) => {
-    const { username, password, role, email, available_hours_per_week } = req.body;
-    
-    const query = 'INSERT INTO users (username, password, role, email, available_hours_per_week) VALUES (?, ?, ?, ?, ?)';
-    
-    pool.execute(query, [username, password, role, email, available_hours_per_week || 40], (err, results) => {
-        if (err) {
-            console.error('Add team member error:', err);
-            return res.status(500).json({ message: 'Database error' });
-        }
-        res.json({ id: results.insertId, message: 'Team member added successfully' });
-    });
+app.post("/api/team", (req, res) => {
+  const { username, password, role, email, available_hours_per_week } =
+    req.body;
+
+  const query =
+    "INSERT INTO users (username, password, role, email, available_hours_per_week) VALUES (?, ?, ?, ?, ?)";
+
+  pool.execute(
+    query,
+    [username, password, role, email, available_hours_per_week || 40],
+    (err, results) => {
+      if (err) {
+        console.error("Add team member error:", err);
+        return res.status(500).json({ message: "Database error" });
+      }
+      res.json({
+        id: results.insertId,
+        message: "Team member added successfully",
+      });
+    }
+  );
 });
 
 // Project Routes - Get all projects
@@ -544,16 +669,16 @@ app.post('/api/team', (req, res) => {
  *             schema:
  *               $ref: '#/components/schemas/Error'
  */
-app.get('/api/projects', (req, res) => {
-    const query = 'SELECT * FROM projects ORDER BY name';
-    
-    pool.execute(query, (err, results) => {
-        if (err) {
-            console.error('Projects fetch error:', err);
-            return res.status(500).json({ message: 'Database error' });
-        }
-        res.json(results);
-    });
+app.get("/api/projects", (req, res) => {
+  const query = "SELECT * FROM projects ORDER BY name";
+
+  pool.execute(query, (err, results) => {
+    if (err) {
+      console.error("Projects fetch error:", err);
+      return res.status(500).json({ message: "Database error" });
+    }
+    res.json(results);
+  });
 });
 
 // Add new project
@@ -581,7 +706,7 @@ app.get('/api/projects', (req, res) => {
  *                 example: "Complete redesign of company website"
  *               budget:
  *                 type: number
- *                 example: 50050
+ *                 example: 50000
  *               estimated_hours:
  *                 type: integer
  *                 example: 200
@@ -623,93 +748,121 @@ app.get('/api/projects', (req, res) => {
  *             schema:
  *               $ref: '#/components/schemas/Error'
  */
-app.post('/api/projects', (req, res) => {
-    const { name, description, budget, estimated_hours, start_date, end_date, status } = req.body;
-    
-    // Validate required fields
-    if (!name) {
-        return res.status(400).json({ message: 'Project name is required' });
+app.post("/api/projects", (req, res) => {
+  const {
+    name,
+    description,
+    budget,
+    estimated_hours,
+    start_date,
+    end_date,
+    status,
+  } = req.body;
+
+  // Validate required fields
+  if (!name) {
+    return res.status(400).json({ message: "Project name is required" });
+  }
+
+  const query =
+    "INSERT INTO projects (name, description, budget, estimated_hours, start_date, end_date, status) VALUES (?, ?, ?, ?, ?, ?, ?)";
+
+  pool.execute(
+    query,
+    [
+      name,
+      description,
+      budget,
+      estimated_hours,
+      start_date,
+      end_date,
+      status || "active",
+    ],
+    (err, results) => {
+      if (err) {
+        console.error("Add project error:", err);
+        return res.status(500).json({ message: "Database error" });
+      }
+      res.json({ id: results.insertId, message: "Project added successfully" });
     }
-    
-    const query = 'INSERT INTO projects (name, description, budget, estimated_hours, start_date, end_date, status) VALUES (?, ?, ?, ?, ?, ?, ?)';
-    
-    pool.execute(query, [name, description, budget, estimated_hours, start_date, end_date, status || 'active'], (err, results) => {
-        if (err) {
-            console.error('Add project error:', err);
-            return res.status(500).json({ message: 'Database error' });
-        }
-        res.json({ id: results.insertId, message: 'Project added successfully' });
-    });
+  );
 });
 
 // Update project
-app.put('/api/projects/:id', (req, res) => {
-    const { id } = req.params;
-    const updateData = req.body;
-    
-    // Build dynamic query based on provided fields
-    const fields = [];
-    const values = [];
-    
-    const allowedFields = [
-        'name', 'description', 'budget', 'estimated_hours', 
-        'start_date', 'end_date', 'status', 'team_lead_id', 'progress'
-    ];
-    
-    for (const [key, value] of Object.entries(updateData)) {
-        if (allowedFields.includes(key) && value !== undefined) {
-            fields.push(`${key} = ?`);
-            // Handle empty date strings - convert to NULL for database
-            if ((key === 'start_date' || key === 'end_date') && value === '') {
-                values.push(null);
-            } else {
-                values.push(value);
-            }
-        }
+app.put("/api/projects/:id", (req, res) => {
+  const { id } = req.params;
+  const updateData = req.body;
+
+  // Build dynamic query based on provided fields
+  const fields = [];
+  const values = [];
+
+  const allowedFields = [
+    "name",
+    "description",
+    "budget",
+    "estimated_hours",
+    "start_date",
+    "end_date",
+    "status",
+    "team_lead_id",
+    "progress",
+  ];
+
+  for (const [key, value] of Object.entries(updateData)) {
+    if (allowedFields.includes(key) && value !== undefined) {
+      fields.push(`${key} = ?`);
+      // Handle empty date strings - convert to NULL for database
+      if ((key === "start_date" || key === "end_date") && value === "") {
+        values.push(null);
+      } else {
+        values.push(value);
+      }
     }
-    
-    if (fields.length === 0) {
-        return res.status(400).json({ message: 'No valid fields to update' });
+  }
+
+  if (fields.length === 0) {
+    return res.status(400).json({ message: "No valid fields to update" });
+  }
+
+  values.push(id); // Add ID for WHERE clause
+
+  const query = `UPDATE projects SET ${fields.join(", ")} WHERE id = ?`;
+
+  console.log("Update query:", query);
+  console.log("Update values:", values);
+
+  pool.execute(query, values, (err, results) => {
+    if (err) {
+      console.error("Update project error:", err);
+      console.error("Query:", query);
+      console.error("Values:", values);
+      return res.status(500).json({ message: "Database error" });
     }
-    
-    values.push(id); // Add ID for WHERE clause
-    
-    const query = `UPDATE projects SET ${fields.join(', ')} WHERE id = ?`;
-    
-    console.log('Update query:', query);
-    console.log('Update values:', values);
-    
-    pool.execute(query, values, (err, results) => {
-        if (err) {
-            console.error('Update project error:', err);
-            console.error('Query:', query);
-            console.error('Values:', values);
-            return res.status(500).json({ message: 'Database error' });
-        }
-        res.json({ message: 'Project updated successfully' });
-    });
+    res.json({ message: "Project updated successfully" });
+  });
 });
 
 // Delete project
-app.delete('/api/projects/:id', (req, res) => {
-    const { id } = req.params;
-    
-    const query = 'DELETE FROM projects WHERE id = ?';
-    
-    pool.execute(query, [id], (err, results) => {
-        if (err) {
-            console.error('Delete project error:', err);
-            return res.status(500).json({ message: 'Database error' });
-        }
-        res.json({ message: 'Project deleted successfully' });
-    });
+app.delete("/api/projects/:id", (req, res) => {
+  const { id } = req.params;
+
+  const query = "DELETE FROM projects WHERE id = ?";
+
+  pool.execute(query, [id], (err, results) => {
+    if (err) {
+      console.error("Delete project error:", err);
+      return res.status(500).json({ message: "Database error" });
+    }
+    res.json({ message: "Project deleted successfully" });
+  });
 });
 
 // Get projects assigned to a specific user
-app.get('/api/users/:userId/projects', (req, res) => {
-    const { userId } = req.params;
-    
-    const query = `
+app.get("/api/users/:userId/projects", (req, res) => {
+  const { userId } = req.params;
+
+  const query = `
         SELECT DISTINCT
             p.*,
             ptm.allocated_hours_per_week,
@@ -721,21 +874,21 @@ app.get('/api/users/:userId/projects', (req, res) => {
         WHERE u.id = ?
         ORDER BY p.name
     `;
-    
-    pool.execute(query, [userId], (err, results) => {
-        if (err) {
-            console.error('User projects fetch error:', err);
-            return res.status(500).json({ message: 'Database error' });
-        }
-        res.json(results);
-    });
+
+  pool.execute(query, [userId], (err, results) => {
+    if (err) {
+      console.error("User projects fetch error:", err);
+      return res.status(500).json({ message: "Database error" });
+    }
+    res.json(results);
+  });
 });
 
 // Get project details for a specific user (including available hours and tasks)
-app.get('/api/users/:userId/projects/:projectId', (req, res) => {
-    const { userId, projectId } = req.params;
-    
-    const query = `
+app.get("/api/users/:userId/projects/:projectId", (req, res) => {
+  const { userId, projectId } = req.params;
+
+  const query = `
         SELECT 
             p.*,
             ptm.allocated_hours_per_week,
@@ -750,24 +903,26 @@ app.get('/api/users/:userId/projects/:projectId', (req, res) => {
         JOIN users u ON ptm.user_id = u.id
         WHERE u.id = ? AND p.id = ?
     `;
-    
-    pool.execute(query, [userId, projectId], (err, results) => {
-        if (err) {
-            console.error('User project details fetch error:', err);
-            return res.status(500).json({ message: 'Database error' });
-        }
-        if (results.length === 0) {
-            return res.status(404).json({ message: 'Project not found or not assigned to user' });
-        }
-        res.json(results[0]);
-    });
+
+  pool.execute(query, [userId, projectId], (err, results) => {
+    if (err) {
+      console.error("User project details fetch error:", err);
+      return res.status(500).json({ message: "Database error" });
+    }
+    if (results.length === 0) {
+      return res
+        .status(404)
+        .json({ message: "Project not found or not assigned to user" });
+    }
+    res.json(results[0]);
+  });
 });
 
 // Get tasks assigned to a specific user
-app.get('/api/users/:userId/tasks', (req, res) => {
-    const { userId } = req.params;
-    
-    const query = `
+app.get("/api/users/:userId/tasks", (req, res) => {
+  const { userId } = req.params;
+
+  const query = `
         SELECT 
             t.*,
             u.username as assignee_name,
@@ -778,21 +933,21 @@ app.get('/api/users/:userId/tasks', (req, res) => {
         WHERE u.id = ?
         ORDER BY t.created_at DESC
     `;
-    
-    pool.execute(query, [userId], (err, results) => {
-        if (err) {
-            console.error('User tasks fetch error:', err);
-            return res.status(500).json({ message: 'Database error' });
-        }
-        res.json(results);
-    });
+
+  pool.execute(query, [userId], (err, results) => {
+    if (err) {
+      console.error("User tasks fetch error:", err);
+      return res.status(500).json({ message: "Database error" });
+    }
+    res.json(results);
+  });
 });
 
 // Get tasks for a specific project assigned to a specific user
-app.get('/api/users/:userId/projects/:projectId/tasks', (req, res) => {
-    const { userId, projectId } = req.params;
-    
-    const query = `
+app.get("/api/users/:userId/projects/:projectId/tasks", (req, res) => {
+  const { userId, projectId } = req.params;
+
+  const query = `
         SELECT 
             t.*,
             u.username as assignee_name,
@@ -803,22 +958,22 @@ app.get('/api/users/:userId/projects/:projectId/tasks', (req, res) => {
         WHERE u.id = ? AND t.project_id = ?
         ORDER BY t.created_at DESC
     `;
-    
-    pool.execute(query, [userId, projectId], (err, results) => {
-        if (err) {
-            console.error('User project tasks fetch error:', err);
-            return res.status(500).json({ message: 'Database error' });
-        }
-        res.json(results);
-    });
+
+  pool.execute(query, [userId, projectId], (err, results) => {
+    if (err) {
+      console.error("User project tasks fetch error:", err);
+      return res.status(500).json({ message: "Database error" });
+    }
+    res.json(results);
+  });
 });
 
 // Project Team Member Routes
 // Get team members for a specific project
-app.get('/api/projects/:id/team', (req, res) => {
-    const { id } = req.params;
-    
-    const query = `
+app.get("/api/projects/:id/team", (req, res) => {
+  const { id } = req.params;
+
+  const query = `
         SELECT 
             ptm.*,
             u.username as team_member_name,
@@ -830,110 +985,133 @@ app.get('/api/projects/:id/team', (req, res) => {
         WHERE ptm.project_id = ?
         ORDER BY u.username
     `;
-    
-    pool.execute(query, [id], (err, results) => {
-        if (err) {
-            console.error('Project team fetch error:', err);
-            return res.status(500).json({ message: 'Database error' });
-        }
-        res.json(results);
-    });
+
+  pool.execute(query, [id], (err, results) => {
+    if (err) {
+      console.error("Project team fetch error:", err);
+      return res.status(500).json({ message: "Database error" });
+    }
+    res.json(results);
+  });
 });
 
 // Add team member to project
-app.post('/api/projects/:id/team', (req, res) => {
-    const { id } = req.params;
-    const { user_id, allocated_hours_per_week } = req.body;
-    
-    if (!user_id || !allocated_hours_per_week) {
-        return res.status(400).json({ message: 'User ID and allocated hours are required' });
+app.post("/api/projects/:id/team", (req, res) => {
+  const { id } = req.params;
+  const { user_id, allocated_hours_per_week } = req.body;
+
+  if (!user_id || !allocated_hours_per_week) {
+    return res
+      .status(400)
+      .json({ message: "User ID and allocated hours are required" });
+  }
+
+  // Check if user exists
+  const checkUserQuery = "SELECT id FROM users WHERE id = ?";
+
+  pool.execute(checkUserQuery, [user_id], (err, results) => {
+    if (err) {
+      console.error("Check user error:", err);
+      return res.status(500).json({ message: "Database error" });
     }
-    
-    // Check if user exists
-    const checkUserQuery = 'SELECT id FROM users WHERE id = ?';
-    
-    pool.execute(checkUserQuery, [user_id], (err, results) => {
-        if (err) {
-            console.error('Check user error:', err);
-            return res.status(500).json({ message: 'Database error' });
+
+    if (results.length === 0) {
+      return res.status(400).json({ message: "User not found" });
+    }
+
+    // Check if user is already assigned to this project
+    const checkExistingQuery =
+      "SELECT id FROM project_team_members WHERE project_id = ? AND user_id = ?";
+
+    pool.execute(checkExistingQuery, [id, user_id], (err, existingResults) => {
+      if (err) {
+        console.error("Check existing assignment error:", err);
+        return res.status(500).json({ message: "Database error" });
+      }
+
+      if (existingResults.length > 0) {
+        return res
+          .status(400)
+          .json({ message: "User is already assigned to this project" });
+      }
+
+      // Add user to project
+      const addToProjectQuery =
+        "INSERT INTO project_team_members (project_id, user_id, allocated_hours_per_week) VALUES (?, ?, ?)";
+
+      pool.execute(
+        addToProjectQuery,
+        [id, user_id, allocated_hours_per_week],
+        (err, projectResults) => {
+          if (err) {
+            console.error("Add user to project error:", err);
+            return res.status(500).json({ message: "Database error" });
+          }
+          res.json({
+            id: projectResults.insertId,
+            message: "User added to project successfully",
+          });
         }
-        
-        if (results.length === 0) {
-            return res.status(400).json({ message: 'User not found' });
-        }
-        
-        // Check if user is already assigned to this project
-        const checkExistingQuery = 'SELECT id FROM project_team_members WHERE project_id = ? AND user_id = ?';
-        
-        pool.execute(checkExistingQuery, [id, user_id], (err, existingResults) => {
-            if (err) {
-                console.error('Check existing assignment error:', err);
-                return res.status(500).json({ message: 'Database error' });
-            }
-            
-            if (existingResults.length > 0) {
-                return res.status(400).json({ message: 'User is already assigned to this project' });
-            }
-            
-            // Add user to project
-            const addToProjectQuery = 'INSERT INTO project_team_members (project_id, user_id, allocated_hours_per_week) VALUES (?, ?, ?)';
-            
-            pool.execute(addToProjectQuery, [id, user_id, allocated_hours_per_week], (err, projectResults) => {
-                if (err) {
-                    console.error('Add user to project error:', err);
-                    return res.status(500).json({ message: 'Database error' });
-                }
-                res.json({ id: projectResults.insertId, message: 'User added to project successfully' });
-            });
-        });
+      );
     });
+  });
 });
 
 // Remove team member from project
-app.delete('/api/projects/:projectId/team/:userId', (req, res) => {
-    const { projectId, userId } = req.params;
-    
-    const query = 'DELETE FROM project_team_members WHERE project_id = ? AND user_id = ?';
-    
-    pool.execute(query, [projectId, userId], (err, results) => {
-        if (err) {
-            console.error('Remove team member from project error:', err);
-            return res.status(500).json({ message: 'Database error' });
-        }
-        res.json({ message: 'Team member removed from project successfully' });
-    });
+app.delete("/api/projects/:projectId/team/:userId", (req, res) => {
+  const { projectId, userId } = req.params;
+
+  const query =
+    "DELETE FROM project_team_members WHERE project_id = ? AND user_id = ?";
+
+  pool.execute(query, [projectId, userId], (err, results) => {
+    if (err) {
+      console.error("Remove team member from project error:", err);
+      return res.status(500).json({ message: "Database error" });
+    }
+    res.json({ message: "Team member removed from project successfully" });
+  });
 });
 
 // Update team member hours
-app.put('/api/projects/:projectId/team/:userId', (req, res) => {
-    const { projectId, userId } = req.params;
-    const { allocated_hours_per_week } = req.body;
-    
-    if (!allocated_hours_per_week) {
-        return res.status(400).json({ message: 'Allocated hours per week is required' });
+app.put("/api/projects/:projectId/team/:userId", (req, res) => {
+  const { projectId, userId } = req.params;
+  const { allocated_hours_per_week } = req.body;
+
+  if (!allocated_hours_per_week) {
+    return res
+      .status(400)
+      .json({ message: "Allocated hours per week is required" });
+  }
+
+  const query =
+    "UPDATE project_team_members SET allocated_hours_per_week = ? WHERE project_id = ? AND user_id = ?";
+
+  pool.execute(
+    query,
+    [allocated_hours_per_week, projectId, userId],
+    (err, results) => {
+      if (err) {
+        console.error("Update team member hours error:", err);
+        return res.status(500).json({ message: "Database error" });
+      }
+
+      if (results.affectedRows === 0) {
+        return res
+          .status(404)
+          .json({ message: "Team member not found in project" });
+      }
+
+      res.json({ message: "Team member hours updated successfully" });
     }
-    
-    const query = 'UPDATE project_team_members SET allocated_hours_per_week = ? WHERE project_id = ? AND user_id = ?';
-    
-    pool.execute(query, [allocated_hours_per_week, projectId, userId], (err, results) => {
-        if (err) {
-            console.error('Update team member hours error:', err);
-            return res.status(500).json({ message: 'Database error' });
-        }
-        
-        if (results.affectedRows === 0) {
-            return res.status(404).json({ message: 'Team member not found in project' });
-        }
-        
-        res.json({ message: 'Team member hours updated successfully' });
-    });
+  );
 });
 
 // Get available users (not assigned to this project as team members)
-app.get('/api/projects/:id/available-team', (req, res) => {
-    const { id } = req.params;
-    
-    const query = `
+app.get("/api/projects/:id/available-team", (req, res) => {
+  const { id } = req.params;
+
+  const query = `
         SELECT 
             u.id as user_id,
             u.username,
@@ -948,14 +1126,14 @@ app.get('/api/projects/:id/available-team', (req, res) => {
         )
         ORDER BY u.username
     `;
-    
-    pool.execute(query, [id], (err, results) => {
-        if (err) {
-            console.error('Available team fetch error:', err);
-            return res.status(500).json({ message: 'Database error' });
-        }
-        res.json(results);
-    });
+
+  pool.execute(query, [id], (err, results) => {
+    if (err) {
+      console.error("Available team fetch error:", err);
+      return res.status(500).json({ message: "Database error" });
+    }
+    res.json(results);
+  });
 });
 
 // Task Routes - Get all tasks
@@ -982,8 +1160,8 @@ app.get('/api/projects/:id/available-team', (req, res) => {
  *             schema:
  *               $ref: '#/components/schemas/Error'
  */
-app.get('/api/tasks', (req, res) => {
-    const query = `
+app.get("/api/tasks", (req, res) => {
+  const query = `
         SELECT 
             t.*,
             u.username as assignee_name,
@@ -993,20 +1171,20 @@ app.get('/api/tasks', (req, res) => {
         LEFT JOIN projects p ON t.project_id = p.id
         ORDER BY t.created_at DESC
     `;
-    
-    pool.execute(query, (err, results) => {
-        if (err) {
-            console.error('Tasks fetch error:', err);
-            return res.status(500).json({ message: 'Database error' });
-        }
-        res.json(results);
-    });
+
+  pool.execute(query, (err, results) => {
+    if (err) {
+      console.error("Tasks fetch error:", err);
+      return res.status(500).json({ message: "Database error" });
+    }
+    res.json(results);
+  });
 });
 
 // Get tasks by project
-app.get('/api/tasks/project/:projectId', (req, res) => {
-    const { projectId } = req.params;
-    const query = `
+app.get("/api/tasks/project/:projectId", (req, res) => {
+  const { projectId } = req.params;
+  const query = `
         SELECT 
             t.*,
             u.username as assignee_name,
@@ -1017,20 +1195,20 @@ app.get('/api/tasks/project/:projectId', (req, res) => {
         WHERE t.project_id = ?
         ORDER BY t.created_at DESC
     `;
-    
-    pool.execute(query, [projectId], (err, results) => {
-        if (err) {
-            console.error('Project tasks fetch error:', err);
-            return res.status(500).json({ message: 'Database error' });
-        }
-        res.json(results);
-    });
+
+  pool.execute(query, [projectId], (err, results) => {
+    if (err) {
+      console.error("Project tasks fetch error:", err);
+      return res.status(500).json({ message: "Database error" });
+    }
+    res.json(results);
+  });
 });
 
 // Get tasks by assignee
-app.get('/api/tasks/assignee/:assigneeId', (req, res) => {
-    const { assigneeId } = req.params;
-    const query = `
+app.get("/api/tasks/assignee/:assigneeId", (req, res) => {
+  const { assigneeId } = req.params;
+  const query = `
         SELECT 
             t.*,
             u.username as assignee_name,
@@ -1041,14 +1219,14 @@ app.get('/api/tasks/assignee/:assigneeId', (req, res) => {
         WHERE t.assignee_id = ?
         ORDER BY t.created_at DESC
     `;
-    
-    pool.execute(query, [assigneeId], (err, results) => {
-        if (err) {
-            console.error('Assignee tasks fetch error:', err);
-            return res.status(500).json({ message: 'Database error' });
-        }
-        res.json(results);
-    });
+
+  pool.execute(query, [assigneeId], (err, results) => {
+    if (err) {
+      console.error("Assignee tasks fetch error:", err);
+      return res.status(500).json({ message: "Database error" });
+    }
+    res.json(results);
+  });
 });
 
 // Add new task
@@ -1125,39 +1303,39 @@ app.get('/api/tasks/assignee/:assigneeId', (req, res) => {
  *             schema:
  *               $ref: '#/components/schemas/Error'
  */
-app.post('/api/tasks', (req, res) => {
-    const { 
-        name, 
-        description, 
-        assignee_id, 
-        project_id, 
-        planned_hours, 
-        priority, 
-        task_type, 
-        due_date, 
-        attachments,
-        status = 'todo',
-        // Workload tracking fields
-        workload_warning_level = 'none',
-        workload_warnings = null,
-        utilization_percentage = 0,
-        allocation_utilization = 0,
-        weeks_until_due = 0,
-        current_task_count = 0,
-        total_workload_hours = 0,
-        available_hours = 0,
-        allocated_hours = 0
-    } = req.body;
-    
-    // Ensure all undefined values are converted to null
-    const safeDescription = description || null;
-    const safePriority = priority || 'medium';
-    const safeTaskType = task_type || 'development';
-    const safeDueDate = due_date || null;
-    const safeAttachments = attachments || null;
-    const safeWorkloadWarnings = workload_warnings || null;
-    
-    const query = `
+app.post("/api/tasks", (req, res) => {
+  const {
+    name,
+    description,
+    assignee_id,
+    project_id,
+    planned_hours,
+    priority,
+    task_type,
+    due_date,
+    attachments,
+    status = "todo",
+    // Workload tracking fields
+    workload_warning_level = "none",
+    workload_warnings = null,
+    utilization_percentage = 0,
+    allocation_utilization = 0,
+    weeks_until_due = 0,
+    current_task_count = 0,
+    total_workload_hours = 0,
+    available_hours = 0,
+    allocated_hours = 0,
+  } = req.body;
+
+  // Ensure all undefined values are converted to null
+  const safeDescription = description || null;
+  const safePriority = priority || "medium";
+  const safeTaskType = task_type || "development";
+  const safeDueDate = due_date || null;
+  const safeAttachments = attachments || null;
+  const safeWorkloadWarnings = workload_warnings || null;
+
+  const query = `
         INSERT INTO tasks (
             name, description, assignee_id, project_id, planned_hours, 
             priority, task_type, due_date, attachments, status,
@@ -1166,73 +1344,101 @@ app.post('/api/tasks', (req, res) => {
             total_workload_hours, available_hours, allocated_hours
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `;
-    
-    pool.execute(query, [
-        name, safeDescription, assignee_id, project_id, planned_hours, 
-        safePriority, safeTaskType, safeDueDate, safeAttachments, status,
-        workload_warning_level, safeWorkloadWarnings, utilization_percentage,
-        allocation_utilization, weeks_until_due, current_task_count,
-        total_workload_hours, available_hours, allocated_hours
-    ], (err, results) => {
-        if (err) {
-            console.error('Add task error:', err);
-            return res.status(500).json({ message: 'Database error' });
-        }
-        res.json({ id: results.insertId, message: 'Task added successfully' });
-    });
+
+  pool.execute(
+    query,
+    [
+      name,
+      safeDescription,
+      assignee_id,
+      project_id,
+      planned_hours,
+      safePriority,
+      safeTaskType,
+      safeDueDate,
+      safeAttachments,
+      status,
+      workload_warning_level,
+      safeWorkloadWarnings,
+      utilization_percentage,
+      allocation_utilization,
+      weeks_until_due,
+      current_task_count,
+      total_workload_hours,
+      available_hours,
+      allocated_hours,
+    ],
+    (err, results) => {
+      if (err) {
+        console.error("Add task error:", err);
+        return res.status(500).json({ message: "Database error" });
+      }
+      res.json({ id: results.insertId, message: "Task added successfully" });
+    }
+  );
 });
 
 // Update task
-app.put('/api/tasks/:id', (req, res) => {
-    const { id } = req.params;
-    const updateData = req.body;
-    
-    // Build dynamic query based on provided fields
-    const fields = [];
-    const values = [];
-    
-    const allowedFields = [
-        'name', 'description', 'status', 'priority', 'assignee_id', 
-        'project_id', 'planned_hours', 'actual_hours', 'task_type', 
-        'due_date', 'attachments', 'work_description', 'productivity_rating'
-    ];
-    
-    for (const [key, value] of Object.entries(updateData)) {
-        if (allowedFields.includes(key) && value !== undefined) {
-            fields.push(`${key} = ?`);
-            values.push(value);
-        }
+app.put("/api/tasks/:id", (req, res) => {
+  const { id } = req.params;
+  const updateData = req.body;
+
+  // Build dynamic query based on provided fields
+  const fields = [];
+  const values = [];
+
+  const allowedFields = [
+    "name",
+    "description",
+    "status",
+    "priority",
+    "assignee_id",
+    "project_id",
+    "planned_hours",
+    "actual_hours",
+    "task_type",
+    "due_date",
+    "attachments",
+    "work_description",
+    "productivity_rating",
+  ];
+
+  for (const [key, value] of Object.entries(updateData)) {
+    if (allowedFields.includes(key) && value !== undefined) {
+      fields.push(`${key} = ?`);
+      values.push(value);
     }
-    
-    if (fields.length === 0) {
-        return res.status(400).json({ message: 'No valid fields to update' });
+  }
+
+  if (fields.length === 0) {
+    return res.status(400).json({ message: "No valid fields to update" });
+  }
+
+  values.push(id); // Add ID for WHERE clause
+
+  const query = `UPDATE tasks SET ${fields.join(", ")} WHERE id = ?`;
+
+  pool.execute(query, values, (err, results) => {
+    if (err) {
+      console.error("Update task error:", err);
+      return res.status(500).json({ message: "Database error" });
     }
-    
-    values.push(id); // Add ID for WHERE clause
-    
-    const query = `UPDATE tasks SET ${fields.join(', ')} WHERE id = ?`;
-    
-    pool.execute(query, values, (err, results) => {
-        if (err) {
-            console.error('Update task error:', err);
-            return res.status(500).json({ message: 'Database error' });
-        }
-        res.json({ message: 'Task updated successfully' });
-    });
+    res.json({ message: "Task updated successfully" });
+  });
 });
 
 // Delete task
-app.delete('/api/tasks/:id', (req, res) => {
-    const { id } = req.params;
-    const query = 'DELETE FROM tasks WHERE id = ?';
-    
-    pool.execute(query, [id], (err, results) => {
-        if (err) {
-            console.error('Delete task error:', err);
-            return res.status(500).json({ message: 'Database error' });
-        }
-        res.json({ message: 'Task deleted successfully' });
-    });
+app.delete("/api/tasks/:id", (req, res) => {
+  const { id } = req.params;
+  const query = "DELETE FROM tasks WHERE id = ?";
+
+  pool.execute(query, [id], (err, results) => {
+    if (err) {
+      console.error("Delete task error:", err);
+      return res.status(500).json({ message: "Database error" });
+    }
+    res.json({ message: "Task deleted successfully" });
+  });
 });
 
 // Metrics Route - Simple metrics for now
@@ -1264,14 +1470,14 @@ app.delete('/api/tasks/:id', (req, res) => {
  *                   type: integer
  *                   example: 75
  */
-app.get('/api/metrics', (req, res) => {
-    const metrics = {
-        total_available_hours: 400, // Will calculate dynamically later
-        total_planned_hours: 180,
-        productivity: 87,
-        utilization: 75
-    };
-    res.json(metrics);
+app.get("/api/metrics", (req, res) => {
+  const metrics = {
+    total_available_hours: 400, // Will calculate dynamically later
+    total_planned_hours: 180,
+    productivity: 87,
+    utilization: 75,
+  };
+  res.json(metrics);
 });
 
 // Dashboard API endpoints
@@ -1337,218 +1543,270 @@ app.get('/api/metrics', (req, res) => {
  *                   items:
  *                     type: object
  */
-app.get('/api/dashboard/data', (req, res) => {
+app.get("/api/dashboard/data", (req, res) => {
   try {
     const { projectId, employeeId, startDate, endDate } = req.query;
-    
-    // Build dynamic query based on filters
+
+    console.log("Dashboard data request:", {
+      projectId,
+      employeeId,
+      startDate,
+      endDate,
+    });
+
+    // Build dynamic query based on filters - apply ALL filters
     let whereConditions = [];
     let queryParams = [];
-    
-    if (projectId && projectId !== 'all') {
-      whereConditions.push('t.project_id = ?');
+
+    // Filter by project
+    if (projectId && projectId !== "all") {
+      whereConditions.push("t.project_id = ?");
       queryParams.push(projectId);
     }
-    
-    if (employeeId && employeeId !== 'all') {
-      whereConditions.push('t.assignee_id = ?');
+
+    // Filter by employee
+    if (employeeId && employeeId !== "all") {
+      whereConditions.push("t.assignee_id = ?");
       queryParams.push(employeeId);
     }
-    
+
+    // Filter by date range - use due_date for proper week grouping
     if (startDate) {
-      whereConditions.push('DATE(t.created_at) >= ?');
+      whereConditions.push("DATE(t.due_date) >= ?");
       queryParams.push(startDate);
     }
-    
+
     if (endDate) {
-      whereConditions.push('DATE(t.created_at) <= ?');
+      whereConditions.push("DATE(t.due_date) <= ?");
       queryParams.push(endDate);
     }
-    
-    const whereClause = whereConditions.length > 0 ? `WHERE ${whereConditions.join(' AND ')}` : '';
-    
-    // Get utilization data (planned hours vs available hours)
+
+    const whereClause =
+      whereConditions.length > 0
+        ? `WHERE ${whereConditions.join(" AND ")}`
+        : "";
+
+    // Get utilization data: (planned hours / available hours) * 100
+    // Group by week within the date range
     const utilizationQuery = `
       SELECT 
-        DATE_FORMAT(t.created_at, '%Y-W%u') as week,
+        DATE_FORMAT(t.due_date, '%Y-W%u') as week,
         SUM(t.planned_hours) as planned_hours,
         SUM(u.available_hours_per_week) as available_hours,
-        ROUND((SUM(t.planned_hours) / SUM(u.available_hours_per_week)) * 100, 1) as utilization_percentage
+        ROUND((SUM(t.planned_hours) / NULLIF(SUM(u.available_hours_per_week), 0)) * 100, 1) as utilization_percentage
       FROM tasks t
       JOIN users u ON t.assignee_id = u.id
       ${whereClause}
-      GROUP BY DATE_FORMAT(t.created_at, '%Y-W%u')
-      ORDER BY week DESC
-      LIMIT 5
+      GROUP BY DATE_FORMAT(t.due_date, '%Y-W%u')
+      ORDER BY week ASC
     `;
-    
-    // Get productivity data (completed tasks vs hours)
+
+    // Get productivity data: completed tasks, actual hours, and productivity percentage
+    // Productivity % = (actual_hours / planned_hours) * 100
+    // Group by week within the date range
     const productivityQuery = `
       SELECT 
-        DATE_FORMAT(t.created_at, '%Y-W%u') as week,
+        DATE_FORMAT(t.due_date, '%Y-W%u') as week,
         COUNT(CASE WHEN t.status = 'completed' THEN 1 END) as completed_tasks,
-        SUM(t.actual_hours) as actual_hours
+        SUM(t.actual_hours) as actual_hours,
+        SUM(t.planned_hours) as planned_hours,
+        ROUND((SUM(t.actual_hours) / NULLIF(SUM(t.planned_hours), 0)) * 100, 1) as productivity_percentage
       FROM tasks t
       JOIN users u ON t.assignee_id = u.id
       ${whereClause}
-      GROUP BY DATE_FORMAT(t.created_at, '%Y-W%u')
-      ORDER BY week DESC
-      LIMIT 5
+      GROUP BY DATE_FORMAT(t.due_date, '%Y-W%u')
+      ORDER BY week ASC
     `;
-    
-    // Get availability data (total available hours per week)
+
+    // Get availability data: total available hours per week
+    // Group by week within the date range
     const availabilityQuery = `
       SELECT 
-        DATE_FORMAT(t.created_at, '%Y-W%u') as week,
+        DATE_FORMAT(t.due_date, '%Y-W%u') as week,
         SUM(u.available_hours_per_week) as available_hours
       FROM tasks t
       JOIN users u ON t.assignee_id = u.id
       ${whereClause}
-      GROUP BY DATE_FORMAT(t.created_at, '%Y-W%u')
-      ORDER BY week DESC
-      LIMIT 5
+      GROUP BY DATE_FORMAT(t.due_date, '%Y-W%u')
+      ORDER BY week ASC
     `;
-    
-    // Execute queries
+
+    // Execute all queries
     pool.execute(utilizationQuery, queryParams, (err, utilizationRows) => {
       if (err) {
-        console.error('Utilization query error:', err);
-        return res.status(500).json({ error: 'Database error' });
+        console.error("Utilization query error:", err);
+        return res
+          .status(500)
+          .json({ error: "Database error", details: err.message });
       }
-      
+
       pool.execute(productivityQuery, queryParams, (err, productivityRows) => {
         if (err) {
-          console.error('Productivity query error:', err);
-          return res.status(500).json({ error: 'Database error' });
+          console.error("Productivity query error:", err);
+          return res
+            .status(500)
+            .json({ error: "Database error", details: err.message });
         }
-        
-        pool.execute(availabilityQuery, queryParams, (err, availabilityRows) => {
-          if (err) {
-            console.error('Availability query error:', err);
-            return res.status(500).json({ error: 'Database error' });
+
+        pool.execute(
+          availabilityQuery,
+          queryParams,
+          (err, availabilityRows) => {
+            if (err) {
+              console.error("Availability query error:", err);
+              return res
+                .status(500)
+                .json({ error: "Database error", details: err.message });
+            }
+
+            console.log("Utilization rows:", utilizationRows.length);
+            console.log("Productivity rows:", productivityRows.length);
+            console.log("Availability rows:", availabilityRows.length);
+
+            // Format data for charts
+            const utilizationData = utilizationRows.map((row) => ({
+              week: row.week,
+              utilization: parseFloat(row.utilization_percentage) || 0,
+              completed: 0, // Will be filled from productivity data
+              hours: 0, // Will be filled from productivity data
+              availableHours: parseInt(row.available_hours) || 0,
+            }));
+
+            const productivityData = productivityRows.map((row) => ({
+              week: row.week,
+              utilization: 0, // Will be filled from utilization data
+              completed: parseInt(row.completed_tasks) || 0,
+              hours: parseFloat(row.actual_hours) || 0,
+              productivity: parseFloat(row.productivity_percentage) || 0,
+              plannedHours: parseFloat(row.planned_hours) || 0,
+              availableHours: 0, // Will be filled from availability data
+            }));
+
+            const availabilityData = availabilityRows.map((row) => ({
+              week: row.week,
+              utilization: 0, // Will be filled from utilization data
+              completed: 0, // Will be filled from productivity data
+              hours: 0, // Will be filled from productivity data
+              availableHours: parseInt(row.available_hours) || 0,
+            }));
+
+            // Merge data to ensure all charts have complete data
+            const allWeeks = new Set([
+              ...utilizationData.map((d) => d.week),
+              ...productivityData.map((d) => d.week),
+              ...availabilityData.map((d) => d.week),
+            ]);
+
+            const mergedData = Array.from(allWeeks)
+              .map((week) => {
+                const util = utilizationData.find((d) => d.week === week) || {
+                  utilization: 0,
+                  availableHours: 0,
+                };
+                const prod = productivityData.find((d) => d.week === week) || {
+                  completed: 0,
+                  hours: 0,
+                  productivity: 0,
+                  plannedHours: 0,
+                };
+                const avail = availabilityData.find((d) => d.week === week) || {
+                  availableHours: 0,
+                };
+
+                return {
+                  week,
+                  utilization: util.utilization,
+                  completed: prod.completed,
+                  hours: prod.hours,
+                  productivity: prod.productivity,
+                  plannedHours: prod.plannedHours,
+                  availableHours: avail.availableHours || util.availableHours,
+                };
+              })
+              .sort((a, b) => a.week.localeCompare(b.week));
+
+            console.log(
+              "Merged data weeks:",
+              mergedData.map((d) => d.week)
+            );
+
+            res.json({
+              utilizationData: mergedData,
+              productivityData: mergedData,
+              availabilityData: mergedData,
+            });
           }
-          
-          // Format data for charts
-          const utilizationData = utilizationRows.map(row => ({
-            week: row.week,
-            utilization: parseFloat(row.utilization_percentage) || 0,
-            completed: 0, // Will be filled from productivity data
-            hours: 0, // Will be filled from productivity data
-            availableHours: parseInt(row.available_hours) || 0
-          }));
-          
-          const productivityData = productivityRows.map(row => ({
-            week: row.week,
-            utilization: 0, // Will be filled from utilization data
-            completed: parseInt(row.completed_tasks) || 0,
-            hours: parseFloat(row.actual_hours) || 0,
-            availableHours: 0 // Will be filled from availability data
-          }));
-          
-          const availabilityData = availabilityRows.map(row => ({
-            week: row.week,
-            utilization: 0, // Will be filled from utilization data
-            completed: 0, // Will be filled from productivity data
-            hours: 0, // Will be filled from productivity data
-            availableHours: parseInt(row.available_hours) || 0
-          }));
-          
-          // Merge data to ensure all charts have complete data
-          const allWeeks = new Set([
-            ...utilizationData.map(d => d.week),
-            ...productivityData.map(d => d.week),
-            ...availabilityData.map(d => d.week)
-          ]);
-          
-          const mergedData = Array.from(allWeeks).map(week => {
-            const util = utilizationData.find(d => d.week === week) || { utilization: 0, availableHours: 0 };
-            const prod = productivityData.find(d => d.week === week) || { completed: 0, hours: 0 };
-            const avail = availabilityData.find(d => d.week === week) || { availableHours: 0 };
-            
-            return {
-              week,
-              utilization: util.utilization,
-              completed: prod.completed,
-              hours: prod.hours,
-              availableHours: avail.availableHours || util.availableHours
-            };
-          }).sort((a, b) => a.week.localeCompare(b.week));
-          
-          res.json({
-            utilizationData: mergedData,
-            productivityData: mergedData,
-            availabilityData: mergedData
-          });
-        });
+        );
       });
     });
-    
   } catch (error) {
-    console.error('Dashboard data error:', error);
+    console.error("Dashboard data error:", error);
     res.json({
       utilizationData: [],
       productivityData: [],
-      availabilityData: []
+      availabilityData: [],
     });
   }
 });
 
 // Get projects for filter dropdown
-app.get('/api/dashboard/projects', (req, res) => {
-  const query = 'SELECT id, name, status FROM projects ORDER BY name';
-  
+app.get("/api/dashboard/projects", (req, res) => {
+  const query = "SELECT id, name, status FROM projects ORDER BY name";
+
   pool.execute(query, (err, results) => {
     if (err) {
-      console.error('Projects filter error:', err);
-      return res.status(500).json({ error: 'Failed to fetch projects' });
+      console.error("Projects filter error:", err);
+      return res.status(500).json({ error: "Failed to fetch projects" });
     }
     res.json(results);
   });
 });
 
 // Get employees for filter dropdown
-app.get('/api/dashboard/employees', (req, res) => {
-  const query = 'SELECT id, username, email, role, available_hours_per_week FROM users ORDER BY username';
-  
+app.get("/api/dashboard/employees", (req, res) => {
+  const query =
+    "SELECT id, username, email, role, available_hours_per_week FROM users ORDER BY username";
+
   pool.execute(query, (err, results) => {
     if (err) {
-      console.error('Employees filter error:', err);
-      return res.status(500).json({ error: 'Failed to fetch employees' });
+      console.error("Employees filter error:", err);
+      return res.status(500).json({ error: "Failed to fetch employees" });
     }
     res.json(results);
   });
 });
 
 // Get task status distribution for pie chart
-app.get('/api/dashboard/task-status', (req, res) => {
+app.get("/api/dashboard/task-status", (req, res) => {
   const { projectId, employeeId, startDate, endDate } = req.query;
-  
+
   // Build dynamic query based on filters
   let whereConditions = [];
   let queryParams = [];
-  
-  if (projectId && projectId !== 'all') {
-    whereConditions.push('project_id = ?');
+
+  if (projectId && projectId !== "all") {
+    whereConditions.push("project_id = ?");
     queryParams.push(projectId);
   }
-  
-  if (employeeId && employeeId !== 'all') {
-    whereConditions.push('assignee_id = ?');
+
+  if (employeeId && employeeId !== "all") {
+    whereConditions.push("assignee_id = ?");
     queryParams.push(employeeId);
   }
-  
+
   if (startDate) {
-    whereConditions.push('DATE(created_at) >= ?');
+    whereConditions.push("DATE(created_at) >= ?");
     queryParams.push(startDate);
   }
-  
+
   if (endDate) {
-    whereConditions.push('DATE(created_at) <= ?');
+    whereConditions.push("DATE(created_at) <= ?");
     queryParams.push(endDate);
   }
-  
-  const whereClause = whereConditions.length > 0 ? `WHERE ${whereConditions.join(' AND ')}` : '';
-  
+
+  const whereClause =
+    whereConditions.length > 0 ? `WHERE ${whereConditions.join(" AND ")}` : "";
+
   const query = `
     SELECT 
       status,
@@ -1557,27 +1815,29 @@ app.get('/api/dashboard/task-status', (req, res) => {
     ${whereClause}
     GROUP BY status
   `;
-  
+
   pool.execute(query, queryParams, (err, results) => {
     if (err) {
-      console.error('Task status error:', err);
-      return res.status(500).json({ error: 'Failed to fetch task status data' });
+      console.error("Task status error:", err);
+      return res
+        .status(500)
+        .json({ error: "Failed to fetch task status data" });
     }
-    
+
     // Convert array to object format
     const statusData = {
       todo: 0,
       in_progress: 0,
       completed: 0,
-      blocked: 0
+      blocked: 0,
     };
-    
+
     results.forEach((row) => {
       if (statusData.hasOwnProperty(row.status)) {
         statusData[row.status] = row.count;
       }
     });
-    
+
     res.json(statusData);
   });
 });
@@ -1629,7 +1889,7 @@ app.get('/api/dashboard/task-status', (req, res) => {
  *                   items:
  *                     type: object
  */
-app.get('/api/dashboard/tasks-timeline', (req, res) => {
+app.get("/api/dashboard/tasks-timeline", (req, res) => {
   try {
     const { role, userId, projectId, employeeId } = req.query;
 
@@ -1638,20 +1898,22 @@ app.get('/api/dashboard/tasks-timeline', (req, res) => {
     const params = [];
 
     // Role restriction: employees and team_leads only see own tasks unless employeeId provided
-    if (employeeId && employeeId !== 'all') {
-      conditions.push('t.assignee_id = ?');
+    if (employeeId && employeeId !== "all") {
+      conditions.push("t.assignee_id = ?");
       params.push(employeeId);
-    } else if (role === 'employee' || role === 'team_lead') {
-      conditions.push('t.assignee_id = ?');
+    } else if (role === "employee" || role === "team_lead") {
+      conditions.push("t.assignee_id = ?");
       params.push(userId);
     }
 
-    if (projectId && projectId !== 'all') {
-      conditions.push('t.project_id = ?');
+    if (projectId && projectId !== "all") {
+      conditions.push("t.project_id = ?");
       params.push(projectId);
     }
 
-    const baseWhere = conditions.length ? `AND ${conditions.join(' AND ')}` : '';
+    const baseWhere = conditions.length
+      ? `AND ${conditions.join(" AND ")}`
+      : "";
 
     // Helper to build query for a given week offset (0 = this week, 1 = next week)
     const buildQuery = (weekOffset) => `
@@ -1671,23 +1933,30 @@ app.get('/api/dashboard/tasks-timeline', (req, res) => {
 
     pool.execute(buildQuery(0), params, (err, thisRows) => {
       if (err) {
-        console.error('Tasks timeline (this week) error:', err);
-        return res.status(500).json({ error: 'Database error' });
+        console.error("Tasks timeline (this week) error:", err);
+        return res.status(500).json({ error: "Database error" });
       }
       pool.execute(buildQuery(1), params, (err2, nextRows) => {
         if (err2) {
-          console.error('Tasks timeline (next week) error:', err2);
-          return res.status(500).json({ error: 'Database error' });
+          console.error("Tasks timeline (next week) error:", err2);
+          return res.status(500).json({ error: "Database error" });
         }
 
         const mapRow = (row) => {
-          const statusColor = row.status === 'completed' ? 'bg-green-500'
-            : row.status === 'in_progress' ? 'bg-cyan-500'
-            : row.status === 'blocked' ? 'bg-red-500'
-            : 'bg-gray-300';
-          const statusLabel = row.status === 'in_progress' ? 'In Progress'
-            : row.status === 'todo' ? 'To Do'
-            : row.status.charAt(0).toUpperCase() + row.status.slice(1);
+          const statusColor =
+            row.status === "completed"
+              ? "bg-green-500"
+              : row.status === "in_progress"
+              ? "bg-cyan-500"
+              : row.status === "blocked"
+              ? "bg-red-500"
+              : "bg-gray-300";
+          const statusLabel =
+            row.status === "in_progress"
+              ? "In Progress"
+              : row.status === "todo"
+              ? "To Do"
+              : row.status.charAt(0).toUpperCase() + row.status.slice(1);
           return {
             id: row.id,
             title: row.title,
@@ -1695,19 +1964,19 @@ app.get('/api/dashboard/tasks-timeline', (req, res) => {
             status: statusLabel,
             statusColor,
             estimated: Number(row.estimated) || 0,
-            logged: Number(row.logged) || 0
+            logged: Number(row.logged) || 0,
           };
         };
 
         res.json({
           thisWeek: thisRows.map(mapRow),
-          nextWeek: nextRows.map(mapRow)
+          nextWeek: nextRows.map(mapRow),
         });
       });
     });
   } catch (e) {
-    console.error('Tasks timeline error:', e);
-    res.status(500).json({ error: 'Failed to fetch tasks timeline' });
+    console.error("Tasks timeline error:", e);
+    res.status(500).json({ error: "Failed to fetch tasks timeline" });
   }
 });
 
@@ -1795,35 +2064,41 @@ app.get('/api/dashboard/tasks-timeline', (req, res) => {
  *             schema:
  *               $ref: '#/components/schemas/Error'
  */
-app.post('/api/tasks/validate-workload', (req, res) => {
+app.post("/api/tasks/validate-workload", (req, res) => {
   const { assignee_id, project_id, planned_hours, due_date } = req.body;
-  
+
   if (!assignee_id || !project_id || !planned_hours || !due_date) {
-    return res.status(400).json({ error: 'Missing required fields' });
+    return res.status(400).json({ error: "Missing required fields" });
   }
 
   // Get employee's available hours per week
-  pool.execute(`
+  pool.execute(
+    `
     SELECT available_hours_per_week FROM users WHERE id = ?
-  `, [assignee_id], (err, userRows) => {
-    if (err) {
-      console.error('User query error:', err);
-      return res.status(500).json({ error: 'Database error' });
-    }
-    
-    if (userRows.length === 0) {
-      return res.status(404).json({ error: 'Employee not found' });
-    }
-    
-    const availableHoursPerWeek = userRows[0].available_hours_per_week || 40;
-    
-    // Calculate weeks between now and due date
-    const dueDate = new Date(due_date);
-    const today = new Date();
-    const weeksUntilDue = Math.ceil((dueDate - today) / (7 * 24 * 60 * 60 * 1000));
-    
-    // Get current workload for this employee in this project
-    pool.execute(`
+  `,
+    [assignee_id],
+    (err, userRows) => {
+      if (err) {
+        console.error("User query error:", err);
+        return res.status(500).json({ error: "Database error" });
+      }
+
+      if (userRows.length === 0) {
+        return res.status(404).json({ error: "Employee not found" });
+      }
+
+      const availableHoursPerWeek = userRows[0].available_hours_per_week || 40;
+
+      // Calculate weeks between now and due date
+      const dueDate = new Date(due_date);
+      const today = new Date();
+      const weeksUntilDue = Math.ceil(
+        (dueDate - today) / (7 * 24 * 60 * 60 * 1000)
+      );
+
+      // Get current workload for this employee in this project
+      pool.execute(
+        `
       SELECT 
         SUM(planned_hours) as total_planned_hours,
         COUNT(*) as task_count
@@ -1832,120 +2107,163 @@ app.post('/api/tasks/validate-workload', (req, res) => {
         AND project_id = ? 
         AND status IN ('todo', 'in_progress')
         AND due_date <= ?
-    `, [assignee_id, project_id, due_date], (err, workloadRows) => {
-      if (err) {
-        console.error('Workload query error:', err);
-        return res.status(500).json({ error: 'Database error' });
-      }
-      
-      const currentWorkload = workloadRows[0].total_planned_hours || 0;
-      const currentTaskCount = workloadRows[0].task_count || 0;
-      
-      // Calculate total workload including new task
-      const totalWorkload = currentWorkload + planned_hours;
-      
-      // Calculate available capacity
-      const totalAvailableHours = availableHoursPerWeek * weeksUntilDue;
-      const utilizationPercentage = (totalWorkload / totalAvailableHours) * 100;
-      
-      // Get project allocation for this employee
-      pool.execute(`
+    `,
+        [assignee_id, project_id, due_date],
+        (err, workloadRows) => {
+          if (err) {
+            console.error("Workload query error:", err);
+            return res.status(500).json({ error: "Database error" });
+          }
+
+          const currentWorkload = workloadRows[0].total_planned_hours || 0;
+          const currentTaskCount = workloadRows[0].task_count || 0;
+
+          // Calculate total workload including new task
+          const totalWorkload = currentWorkload + planned_hours;
+
+          // Calculate available capacity
+          const totalAvailableHours = availableHoursPerWeek * weeksUntilDue;
+          const utilizationPercentage =
+            (totalWorkload / totalAvailableHours) * 100;
+
+          // Get project allocation for this employee
+          pool.execute(
+            `
         SELECT allocated_hours_per_week 
         FROM project_team_members 
         WHERE project_id = ? AND user_id = ?
-      `, [project_id, assignee_id], (err, allocationRows) => {
-        if (err) {
-          console.error('Allocation query error:', err);
-          return res.status(500).json({ error: 'Database error' });
+      `,
+            [project_id, assignee_id],
+            (err, allocationRows) => {
+              if (err) {
+                console.error("Allocation query error:", err);
+                return res.status(500).json({ error: "Database error" });
+              }
+
+              const allocatedHoursPerWeek =
+                allocationRows.length > 0
+                  ? allocationRows[0].allocated_hours_per_week
+                  : 0;
+              const totalAllocatedHours = allocatedHoursPerWeek * weeksUntilDue;
+              const allocationUtilization =
+                totalAllocatedHours > 0
+                  ? (totalWorkload / totalAllocatedHours) * 100
+                  : 0;
+
+              // Determine warning level
+              let warningLevel = "none";
+              let warnings = [];
+
+              if (utilizationPercentage > 100) {
+                warningLevel = "critical";
+                warnings.push(
+                  `Employee will be overloaded by ${Math.round(
+                    utilizationPercentage - 100
+                  )}%`
+                );
+              } else if (utilizationPercentage > 80) {
+                warningLevel = "high";
+                warnings.push(
+                  `Employee utilization will be ${Math.round(
+                    utilizationPercentage
+                  )}%`
+                );
+              }
+
+              if (allocationUtilization > 100) {
+                warningLevel = "critical";
+                warnings.push(
+                  `Project allocation exceeded by ${Math.round(
+                    allocationUtilization - 100
+                  )}%`
+                );
+              } else if (allocationUtilization > 80) {
+                if (warningLevel === "none") warningLevel = "high";
+                warnings.push(
+                  `Project allocation utilization: ${Math.round(
+                    allocationUtilization
+                  )}%`
+                );
+              }
+
+              if (weeksUntilDue < 1) {
+                warningLevel = "critical";
+                warnings.push("Due date is in the past or today");
+              } else if (weeksUntilDue < 2) {
+                if (warningLevel === "none") warningLevel = "high";
+                warnings.push("Due date is very soon");
+              }
+
+              res.json({
+                isValid: true,
+                warningLevel,
+                warnings,
+                workload: {
+                  currentHours: currentWorkload,
+                  newTaskHours: planned_hours,
+                  totalHours: totalWorkload,
+                  availableHours: totalAvailableHours,
+                  utilizationPercentage: Math.round(utilizationPercentage),
+                  allocatedHours: totalAllocatedHours,
+                  allocationUtilization: Math.round(allocationUtilization),
+                  weeksUntilDue,
+                  currentTaskCount,
+                },
+              });
+            }
+          );
         }
-        
-        const allocatedHoursPerWeek = allocationRows.length > 0 ? allocationRows[0].allocated_hours_per_week : 0;
-        const totalAllocatedHours = allocatedHoursPerWeek * weeksUntilDue;
-        const allocationUtilization = totalAllocatedHours > 0 ? (totalWorkload / totalAllocatedHours) * 100 : 0;
-        
-        // Determine warning level
-        let warningLevel = 'none';
-        let warnings = [];
-        
-        if (utilizationPercentage > 100) {
-          warningLevel = 'critical';
-          warnings.push(`Employee will be overloaded by ${Math.round(utilizationPercentage - 100)}%`);
-        } else if (utilizationPercentage > 80) {
-          warningLevel = 'high';
-          warnings.push(`Employee utilization will be ${Math.round(utilizationPercentage)}%`);
-        }
-        
-        if (allocationUtilization > 100) {
-          warningLevel = 'critical';
-          warnings.push(`Project allocation exceeded by ${Math.round(allocationUtilization - 100)}%`);
-        } else if (allocationUtilization > 80) {
-          if (warningLevel === 'none') warningLevel = 'high';
-          warnings.push(`Project allocation utilization: ${Math.round(allocationUtilization)}%`);
-        }
-        
-        if (weeksUntilDue < 1) {
-          warningLevel = 'critical';
-          warnings.push('Due date is in the past or today');
-        } else if (weeksUntilDue < 2) {
-          if (warningLevel === 'none') warningLevel = 'high';
-          warnings.push('Due date is very soon');
-        }
-        
-        res.json({
-          isValid: true,
-          warningLevel,
-          warnings,
-          workload: {
-            currentHours: currentWorkload,
-            newTaskHours: planned_hours,
-            totalHours: totalWorkload,
-            availableHours: totalAvailableHours,
-            utilizationPercentage: Math.round(utilizationPercentage),
-            allocatedHours: totalAllocatedHours,
-            allocationUtilization: Math.round(allocationUtilization),
-            weeksUntilDue,
-            currentTaskCount
-          }
-        });
-      });
-    });
-  });
+      );
+    }
+  );
 });
 
 // Debug endpoint for workload validation
-app.post('/api/tasks/debug-workload', async (req, res) => {
+app.post("/api/tasks/debug-workload", async (req, res) => {
   try {
-    console.log('Debug workload validation called');
+    console.log("Debug workload validation called");
     const { assignee_id, project_id, planned_hours, due_date } = req.body;
-    console.log('Request body:', { assignee_id, project_id, planned_hours, due_date });
-    
+    console.log("Request body:", {
+      assignee_id,
+      project_id,
+      planned_hours,
+      due_date,
+    });
+
     if (!assignee_id || !project_id || !planned_hours || !due_date) {
-      return res.status(400).json({ error: 'Missing required fields' });
+      return res.status(400).json({ error: "Missing required fields" });
     }
 
     // Get employee's available hours per week
-    const [userRows] = await pool.execute(`
+    const [userRows] = await pool.execute(
+      `
       SELECT available_hours_per_week FROM users WHERE id = ?
-    `, [assignee_id]);
-    
-    console.log('User rows:', userRows);
-    
+    `,
+      [assignee_id]
+    );
+
+    console.log("User rows:", userRows);
+
     if (userRows.length === 0) {
-      return res.status(404).json({ error: 'Employee not found' });
+      return res.status(404).json({ error: "Employee not found" });
     }
-    
-    res.json({ message: 'Debug successful', userRows });
-    
+
+    res.json({ message: "Debug successful", userRows });
   } catch (error) {
-    console.error('Debug workload validation error:', error);
-    res.status(500).json({ error: 'Failed to debug workload validation', details: error.message });
+    console.error("Debug workload validation error:", error);
+    res
+      .status(500)
+      .json({
+        error: "Failed to debug workload validation",
+        details: error.message,
+      });
   }
 });
 
 // Serve static files from the React app build directory
-app.use(express.static(path.join(__dirname, '../frontend/build')));
+app.use(express.static(path.join(__dirname, "../frontend/build")));
 
 const PORT = process.env.PORT || 5005;
 app.listen(PORT, () => {
-    console.log(`Server running on port ${PORT}`);
+  console.log(`Server running on port ${PORT}`);
 });
