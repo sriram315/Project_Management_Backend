@@ -1586,18 +1586,27 @@ app.get("/api/dashboard/data", (req, res) => {
         ? `WHERE ${whereConditions.join(" AND ")}`
         : "";
 
-    // Get utilization data: (planned hours / available hours) * 100
-    // Group by week within the date range
+    // Get utilization data: (planned hours / available hours per week) * 100
+    // For each employee per week: sum planned hours, get their available_hours_per_week
+    // Then calculate utilization percentage per employee and sum across all employees
     const utilizationQuery = `
       SELECT 
-        DATE_FORMAT(t.due_date, '%Y-W%u') as week,
-        SUM(t.planned_hours) as planned_hours,
-        SUM(u.available_hours_per_week) as available_hours,
-        ROUND((SUM(t.planned_hours) / NULLIF(SUM(u.available_hours_per_week), 0)) * 100, 1) as utilization_percentage
-      FROM tasks t
-      JOIN users u ON t.assignee_id = u.id
-      ${whereClause}
-      GROUP BY DATE_FORMAT(t.due_date, '%Y-W%u')
+        week,
+        SUM(planned_hours) as planned_hours,
+        SUM(user_available_hours) as available_hours,
+        ROUND((SUM(planned_hours) / NULLIF(SUM(user_available_hours), 0)) * 100, 1) as utilization_percentage
+      FROM (
+        SELECT 
+          DATE_FORMAT(t.due_date, '%Y-W%u') as week,
+          t.assignee_id,
+          SUM(t.planned_hours) as planned_hours,
+          MAX(u.available_hours_per_week) as user_available_hours
+        FROM tasks t
+        JOIN users u ON t.assignee_id = u.id
+        ${whereClause}
+        GROUP BY DATE_FORMAT(t.due_date, '%Y-W%u'), t.assignee_id
+      ) as employee_utilization
+      GROUP BY week
       ORDER BY week ASC
     `;
 
@@ -1618,16 +1627,24 @@ app.get("/api/dashboard/data", (req, res) => {
       ORDER BY week ASC
     `;
 
-    // Get availability data: total available hours per week
-    // Group by week within the date range
+    // Get availability data: For each employee per week
+    // available_hours_per_week from users table - sum of all planned_hours for that week
     const availabilityQuery = `
       SELECT 
-        DATE_FORMAT(t.due_date, '%Y-W%u') as week,
-        SUM(u.available_hours_per_week) as available_hours
-      FROM tasks t
-      JOIN users u ON t.assignee_id = u.id
-      ${whereClause}
-      GROUP BY DATE_FORMAT(t.due_date, '%Y-W%u')
+        week,
+        SUM(GREATEST(user_available_hours - total_planned_hours, 0)) as available_hours
+      FROM (
+        SELECT 
+          DATE_FORMAT(t.due_date, '%Y-W%u') as week,
+          t.assignee_id,
+          MAX(u.available_hours_per_week) as user_available_hours,
+          SUM(t.planned_hours) as total_planned_hours
+        FROM tasks t
+        JOIN users u ON t.assignee_id = u.id
+        ${whereClause}
+        GROUP BY DATE_FORMAT(t.due_date, '%Y-W%u'), t.assignee_id
+      ) as employee_weekly_hours
+      GROUP BY week
       ORDER BY week ASC
     `;
 
@@ -1720,7 +1737,7 @@ app.get("/api/dashboard/data", (req, res) => {
                   hours: prod.hours,
                   productivity: prod.productivity,
                   plannedHours: prod.plannedHours,
-                  availableHours: avail.availableHours || util.availableHours,
+                  availableHours: avail.availableHours, // Use only the correct availability calculation
                 };
               })
               .sort((a, b) => a.week.localeCompare(b.week));
@@ -2087,7 +2104,7 @@ app.post("/api/tasks/validate-workload", (req, res) => {
         return res.status(404).json({ error: "Employee not found" });
       }
 
-      const availableHoursPerWeek = userRows[0].available_hours_per_week || 40;
+      const availableHoursPerWeek = parseFloat(userRows[0].available_hours_per_week) || 40;
 
       // Calculate weeks between now and due date
       const dueDate = new Date(due_date);
@@ -2096,7 +2113,8 @@ app.post("/api/tasks/validate-workload", (req, res) => {
         (dueDate - today) / (7 * 24 * 60 * 60 * 1000)
       );
 
-      // Get current workload for this employee in this project
+      // Get current workload for this employee in the SAME WEEK as the new task
+      // Calculate the week of the new task using MySQL DATE_FORMAT
       pool.execute(
         `
       SELECT 
@@ -2104,27 +2122,31 @@ app.post("/api/tasks/validate-workload", (req, res) => {
         COUNT(*) as task_count
       FROM tasks 
       WHERE assignee_id = ? 
-        AND project_id = ? 
         AND status IN ('todo', 'in_progress')
-        AND due_date <= ?
+        AND DATE_FORMAT(due_date, '%Y-W%u') = DATE_FORMAT(?, '%Y-W%u')
     `,
-        [assignee_id, project_id, due_date],
+        [assignee_id, due_date],
         (err, workloadRows) => {
           if (err) {
             console.error("Workload query error:", err);
             return res.status(500).json({ error: "Database error" });
           }
 
-          const currentWorkload = workloadRows[0].total_planned_hours || 0;
-          const currentTaskCount = workloadRows[0].task_count || 0;
+          const currentWorkload = parseFloat(workloadRows[0].total_planned_hours) || 0;
+          const currentTaskCount = parseInt(workloadRows[0].task_count) || 0;
 
           // Calculate total workload including new task
-          const totalWorkload = currentWorkload + planned_hours;
+          const totalWorkload = currentWorkload + parseFloat(planned_hours);
 
-          // Calculate available capacity
-          const totalAvailableHours = availableHoursPerWeek * weeksUntilDue;
+          // Calculate available capacity for the week
+          // Total capacity per week
+          const totalCapacityPerWeek = availableHoursPerWeek;
+          
+          // Remaining available hours (like dashboard calculation)
+          const remainingAvailableHours = Math.max(0, availableHoursPerWeek - currentWorkload);
+          
           const utilizationPercentage =
-            (totalWorkload / totalAvailableHours) * 100;
+            (totalWorkload / totalCapacityPerWeek) * 100;
 
           // Get project allocation for this employee
           pool.execute(
@@ -2142,7 +2164,7 @@ app.post("/api/tasks/validate-workload", (req, res) => {
 
               const allocatedHoursPerWeek =
                 allocationRows.length > 0
-                  ? allocationRows[0].allocated_hours_per_week
+                  ? parseFloat(allocationRows[0].allocated_hours_per_week) || 0
                   : 0;
               const totalAllocatedHours = allocatedHoursPerWeek * weeksUntilDue;
               const allocationUtilization =
@@ -2202,7 +2224,7 @@ app.post("/api/tasks/validate-workload", (req, res) => {
                   currentHours: currentWorkload,
                   newTaskHours: planned_hours,
                   totalHours: totalWorkload,
-                  availableHours: totalAvailableHours,
+                  availableHours: remainingAvailableHours,
                   utilizationPercentage: Math.round(utilizationPercentage),
                   allocatedHours: totalAllocatedHours,
                   allocationUtilization: Math.round(allocationUtilization),
@@ -2216,6 +2238,49 @@ app.post("/api/tasks/validate-workload", (req, res) => {
       );
     }
   );
+});
+
+// Debug endpoint for availability calculation
+app.get("/api/debug/availability", (req, res) => {
+  const { projectId, employeeId } = req.query;
+  
+  let whereConditions = [];
+  let queryParams = [];
+  
+  if (projectId && projectId !== "all") {
+    whereConditions.push("t.project_id = ?");
+    queryParams.push(projectId);
+  }
+  
+  if (employeeId && employeeId !== "all") {
+    whereConditions.push("t.assignee_id = ?");
+    queryParams.push(employeeId);
+  }
+  
+  const whereClause = whereConditions.length > 0 ? `WHERE ${whereConditions.join(" AND ")}` : "";
+  
+  const debugQuery = `
+    SELECT 
+      DATE_FORMAT(t.due_date, '%Y-W%u') as week,
+      t.assignee_id,
+      u.username,
+      MAX(u.available_hours_per_week) as user_available_hours,
+      SUM(t.planned_hours) as total_planned_hours,
+      GREATEST(MAX(u.available_hours_per_week) - SUM(t.planned_hours), 0) as available_hours
+    FROM tasks t
+    JOIN users u ON t.assignee_id = u.id
+    ${whereClause}
+    GROUP BY DATE_FORMAT(t.due_date, '%Y-W%u'), t.assignee_id
+    ORDER BY week ASC, u.username ASC
+  `;
+  
+  pool.execute(debugQuery, queryParams, (err, results) => {
+    if (err) {
+      console.error("Debug query error:", err);
+      return res.status(500).json({ error: "Database error", details: err.message });
+    }
+    res.json(results);
+  });
 });
 
 // Debug endpoint for workload validation
