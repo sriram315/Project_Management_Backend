@@ -555,17 +555,97 @@ app.put("/api/users/:id", (req, res) => {
  *             schema:
  *               $ref: '#/components/schemas/Error'
  */
-app.delete("/api/users/:id", (req, res) => {
+// app.delete("/api/users/:id", (req, res) => {
+//   const { id } = req.params;
+
+//   const query = "DELETE FROM users WHERE id = ?";
+
+//   pool.execute(query, [id], (err, results) => {
+//     if (err) {
+//       console.error("Delete user error:", err);
+//       return res.status(500).json({ message: "Database error" });
+//     }
+//     res.json({ message: "User deleted successfully" });
+//   });
+// });
+
+// Delete project (with related cleanup)
+app.delete("/api/projects/:id", (req, res) => {
   const { id } = req.params;
 
-  const query = "DELETE FROM users WHERE id = ?";
+  // Queries for cleanup
+  const deleteTasksQuery = "DELETE FROM tasks WHERE project_id = ?";
+  const deleteTeamMembersQuery =
+    "DELETE FROM project_team_members WHERE project_id = ?";
+  const deleteProjectQuery = "DELETE FROM projects WHERE id = ?";
 
-  pool.execute(query, [id], (err, results) => {
+  pool.getConnection((err, connection) => {
     if (err) {
-      console.error("Delete user error:", err);
-      return res.status(500).json({ message: "Database error" });
+      console.error("Connection error:", err);
+      return res.status(500).json({ message: "Database connection error" });
     }
-    res.json({ message: "User deleted successfully" });
+
+    // Start a transaction to keep consistency
+    connection.beginTransaction((err) => {
+      if (err) {
+        connection.release();
+        console.error("Transaction error:", err);
+        return res.status(500).json({ message: "Transaction error" });
+      }
+
+      // Step 1: Delete related tasks
+      connection.query(deleteTasksQuery, [id], (err) => {
+        if (err) {
+          return connection.rollback(() => {
+            connection.release();
+            console.error("Delete tasks error:", err);
+            res.status(500).json({ message: "Failed to delete project tasks" });
+          });
+        }
+
+        // Step 2: Delete team members
+        connection.query(deleteTeamMembersQuery, [id], (err) => {
+          if (err) {
+            return connection.rollback(() => {
+              connection.release();
+              console.error("Delete team members error:", err);
+              res
+                .status(500)
+                .json({ message: "Failed to delete project team members" });
+            });
+          }
+
+          // Step 3: Delete the project itself
+          connection.query(deleteProjectQuery, [id], (err) => {
+            if (err) {
+              return connection.rollback(() => {
+                connection.release();
+                console.error("Delete project error:", err);
+                res.status(500).json({ message: "Failed to delete project" });
+              });
+            }
+
+            // Commit all deletions
+            connection.commit((err) => {
+              if (err) {
+                return connection.rollback(() => {
+                  connection.release();
+                  console.error("Commit error:", err);
+                  res
+                    .status(500)
+                    .json({ message: "Failed to finalize deletion" });
+                });
+              }
+
+              connection.release();
+              res.json({
+                message: "Project and all related data deleted successfully",
+              });
+            });
+          });
+        });
+      });
+    });
   });
 });
 
@@ -1590,13 +1670,13 @@ app.get("/api/metrics", (req, res) => {
 //     // For each employee per week: sum planned hours, get their available_hours_per_week
 //     // Then calculate utilization percentage per employee and sum across all employees
 //     const utilizationQuery = `
-//       SELECT 
+//       SELECT
 //         week,
 //         SUM(planned_hours) as planned_hours,
 //         SUM(user_available_hours) as available_hours,
 //         ROUND((SUM(planned_hours) / NULLIF(SUM(user_available_hours), 0)) * 100, 1) as utilization_percentage
 //       FROM (
-//         SELECT 
+//         SELECT
 //           DATE_FORMAT(t.due_date, '%Y-W%u') as week,
 //           t.assignee_id,
 //           SUM(t.planned_hours) as planned_hours,
@@ -1614,7 +1694,7 @@ app.get("/api/metrics", (req, res) => {
 //     // Productivity % = (actual_hours / planned_hours) * 100
 //     // Group by week within the date range
 //     const productivityQuery = `
-//       SELECT 
+//       SELECT
 //         DATE_FORMAT(t.due_date, '%Y-W%u') as week,
 //         COUNT(CASE WHEN t.status = 'completed' THEN 1 END) as completed_tasks,
 //         SUM(t.actual_hours) as actual_hours,
@@ -1630,11 +1710,11 @@ app.get("/api/metrics", (req, res) => {
 //     // Get availability data: For each employee per week
 //     // available_hours_per_week from users table - sum of all planned_hours for that week
 //     const availabilityQuery = `
-//       SELECT 
+//       SELECT
 //         week,
 //         SUM(user_available_hours - total_planned_hours) as available_hours
 //       FROM (
-//         SELECT 
+//         SELECT
 //           DATE_FORMAT(t.due_date, '%Y-W%u') as week,
 //           t.assignee_id,
 //           MAX(u.available_hours_per_week) as user_available_hours,
@@ -1846,7 +1926,7 @@ app.get("/api/dashboard/data", (req, res) => {
     const availabilityQuery = `
       SELECT 
         week,
-        SUM(user_available_hours - total_planned_hours) as available_hours
+        SUM(GREATEST(user_available_hours - total_planned_hours, 0)) as available_hours
       FROM (
         SELECT 
           DATE_FORMAT(t.due_date, '%Y-W%u') as week,
@@ -1934,7 +2014,9 @@ app.get("/api/dashboard/data", (req, res) => {
             }
 
             function getWeekNumber(d) {
-              d = new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()));
+              d = new Date(
+                Date.UTC(d.getFullYear(), d.getMonth(), d.getDate())
+              );
               const dayNum = d.getUTCDay() || 7;
               d.setUTCDate(d.getUTCDate() + 4 - dayNum);
               const yearStart = new Date(Date.UTC(d.getUTCFullYear(), 0, 1));
@@ -2004,7 +2086,6 @@ app.get("/api/dashboard/data", (req, res) => {
   }
 });
 
-
 // Get projects for filter dropdown
 app.get("/api/dashboard/projects", (req, res) => {
   const query = "SELECT id, name, status FROM projects ORDER BY name";
@@ -2036,7 +2117,12 @@ app.get("/api/dashboard/employees", (req, res) => {
 app.get("/api/dashboard/task-status", (req, res) => {
   const { projectId, employeeId, startDate, endDate } = req.query;
 
-  console.log("Task status request with filters:", { projectId, employeeId, startDate, endDate });
+  console.log("Task status request with filters:", {
+    projectId,
+    employeeId,
+    startDate,
+    endDate,
+  });
 
   // Build dynamic query based on filters - using due_date for consistency
   let whereConditions = [];
@@ -2103,7 +2189,11 @@ app.get("/api/dashboard/task-status", (req, res) => {
     });
 
     // Calculate totals for logging
-    const totalTasks = statusData.todo + statusData.in_progress + statusData.completed + statusData.blocked;
+    const totalTasks =
+      statusData.todo +
+      statusData.in_progress +
+      statusData.completed +
+      statusData.blocked;
     console.log("Task status response:", { ...statusData, totalTasks });
 
     res.json(statusData);
@@ -2355,7 +2445,8 @@ app.post("/api/tasks/validate-workload", (req, res) => {
         return res.status(404).json({ error: "Employee not found" });
       }
 
-      const availableHoursPerWeek = parseFloat(userRows[0].available_hours_per_week) || 40;
+      const availableHoursPerWeek =
+        parseFloat(userRows[0].available_hours_per_week) || 40;
 
       // Calculate weeks between now and due date
       const dueDate = new Date(due_date);
@@ -2383,7 +2474,8 @@ app.post("/api/tasks/validate-workload", (req, res) => {
             return res.status(500).json({ error: "Database error" });
           }
 
-          const currentWorkload = parseFloat(workloadRows[0].total_planned_hours) || 0;
+          const currentWorkload =
+            parseFloat(workloadRows[0].total_planned_hours) || 0;
           const currentTaskCount = parseInt(workloadRows[0].task_count) || 0;
 
           // Calculate total workload including new task
@@ -2392,10 +2484,13 @@ app.post("/api/tasks/validate-workload", (req, res) => {
           // Calculate available capacity for the week
           // Total capacity per week
           const totalCapacityPerWeek = availableHoursPerWeek;
-          
+
           // Remaining available hours (like dashboard calculation)
-          const remainingAvailableHours = Math.max(0, availableHoursPerWeek - currentWorkload);
-          
+          const remainingAvailableHours = Math.max(
+            0,
+            availableHoursPerWeek - currentWorkload
+          );
+
           const utilizationPercentage =
             (totalWorkload / totalCapacityPerWeek) * 100;
 
@@ -2462,7 +2557,7 @@ app.post("/api/tasks/validate-workload", (req, res) => {
               if (weeksUntilDue < 1) {
                 warningLevel = "critical";
                 // warnings.push("Due date is in the past or today");
-             } //else if (weeksUntilDue < 2) {
+              } //else if (weeksUntilDue < 2) {
               //   if (warningLevel === "none") warningLevel = "high";
               //   warnings.push("Due date is very soon");
               // }
@@ -2494,22 +2589,23 @@ app.post("/api/tasks/validate-workload", (req, res) => {
 // Debug endpoint for availability calculation
 app.get("/api/debug/availability", (req, res) => {
   const { projectId, employeeId } = req.query;
-  
+
   let whereConditions = [];
   let queryParams = [];
-  
+
   if (projectId && projectId !== "all") {
     whereConditions.push("t.project_id = ?");
     queryParams.push(projectId);
   }
-  
+
   if (employeeId && employeeId !== "all") {
     whereConditions.push("t.assignee_id = ?");
     queryParams.push(employeeId);
   }
-  
-  const whereClause = whereConditions.length > 0 ? `WHERE ${whereConditions.join(" AND ")}` : "";
-  
+
+  const whereClause =
+    whereConditions.length > 0 ? `WHERE ${whereConditions.join(" AND ")}` : "";
+
   const debugQuery = `
     SELECT 
       DATE_FORMAT(t.due_date, '%Y-W%u') as week,
@@ -2524,11 +2620,13 @@ app.get("/api/debug/availability", (req, res) => {
     GROUP BY DATE_FORMAT(t.due_date, '%Y-W%u'), t.assignee_id
     ORDER BY week ASC, u.username ASC
   `;
-  
+
   pool.execute(debugQuery, queryParams, (err, results) => {
     if (err) {
       console.error("Debug query error:", err);
-      return res.status(500).json({ error: "Database error", details: err.message });
+      return res
+        .status(500)
+        .json({ error: "Database error", details: err.message });
     }
     res.json(results);
   });
@@ -2567,12 +2665,10 @@ app.post("/api/tasks/debug-workload", async (req, res) => {
     res.json({ message: "Debug successful", userRows });
   } catch (error) {
     console.error("Debug workload validation error:", error);
-    res
-      .status(500)
-      .json({
-        error: "Failed to debug workload validation",
-        details: error.message,
-      });
+    res.status(500).json({
+      error: "Failed to debug workload validation",
+      details: error.message,
+    });
   }
 });
 
