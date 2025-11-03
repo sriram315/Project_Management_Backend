@@ -4,6 +4,7 @@ const mysql = require("mysql2");
 const path = require("path");
 const swaggerJsdoc = require("swagger-jsdoc");
 const swaggerUi = require("swagger-ui-express");
+const nodemailer = require("nodemailer");
 
 const app = express();
 
@@ -151,6 +152,53 @@ pool.getConnection((err, connection) => {
   }
 });
 
+// Create password_resets table if not exists (for OTP storage)
+pool.execute(
+  `CREATE TABLE IF NOT EXISTS password_resets (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    user_id INT NOT NULL,
+    otp VARCHAR(10) NOT NULL,
+    expires_at DATETIME NOT NULL,
+    used TINYINT(1) NOT NULL DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    INDEX(user_id),
+    CONSTRAINT fk_password_resets_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+  (tableErr) => {
+    if (tableErr) {
+      console.error("Failed to ensure password_resets table:", tableErr.message);
+    } else {
+      console.log("password_resets table is ready");
+    }
+  }
+);
+
+// Configure nodemailer transporter for Gmail SMTP (dummy placeholders)
+const transporter = nodemailer.createTransport({
+  service: "gmail",
+  auth: {
+    user:"itsupport@ifocussystec.com",
+    pass:"pzfx dmhd mxmn vxdj",
+  },
+});
+
+async function sendOtpEmail(toEmail, username, otp) {
+  try {
+    const info = await transporter.sendMail({
+      from: process.env.GMAIL_FROM || (process.env.GMAIL_USER || "your.gmail@example.com"),
+      to: toEmail,
+      subject: "Your OTP Code for Password Reset",
+      text: `Hello ${username},\n\nYour OTP code is: ${otp}. It will expire in 10 minutes.\n\nIf you did not request this, please ignore this email.`,
+      html: `<p>Hello <b>${username}</b>,</p><p>Your OTP code is: <b style="font-size:18px;">${otp}</b></p><p>It will expire in 10 minutes.</p><p>If you did not request this, please ignore this email.</p>`,
+    });
+    console.log("OTP email sent:", info.messageId);
+    return true;
+  } catch (e) {
+    console.error("Failed to send OTP email:", e.message);
+    return false;
+  }
+}
+
 // Test route
 /**
  * @swagger
@@ -245,6 +293,164 @@ app.post("/api/auth/login", (req, res) => {
       id: results[0].id,
       username: results[0].username,
       role: results[0].role,
+    });
+  });
+});
+
+// Start password reset - generate OTP and email it to user's registered email
+app.post("/api/auth/forgot/start", (req, res) => {
+  const { username } = req.body || {};
+
+  if (!username) {
+    return res.status(400).json({ message: "Username is required" });
+  }
+
+  const findUserQuery = "SELECT id, username, email FROM users WHERE username = ?";
+  pool.execute(findUserQuery, [username], async (err, rows) => {
+    if (err) {
+      console.error("Forgot start - user lookup error:", err);
+      return res.status(500).json({ message: "Database error" });
+    }
+    if (!rows || rows.length === 0) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    const user = rows[0];
+    if (!user.email) {
+      return res.status(400).json({ message: "User email not available" });
+    }
+
+    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
+
+    const insertReset =
+      "INSERT INTO password_resets (user_id, otp, expires_at, used) VALUES (?, ?, ?, 0)";
+    pool.execute(
+      insertReset,
+      [user.id, otp, new Date(expiresAt)],
+      async (insErr) => {
+        if (insErr) {
+          console.error("Forgot start - insert reset error:", insErr);
+          return res.status(500).json({ message: "Failed to create reset request" });
+        }
+
+        const sent = await sendOtpEmail(user.email, user.username, otp);
+        if (!sent) {
+          return res.status(500).json({ message: "Failed to send OTP email" });
+        }
+
+        return res.json({ message: "OTP sent to registered email" });
+      }
+    );
+  });
+});
+
+// Verify OTP validity
+app.post("/api/auth/forgot/verify", (req, res) => {
+  const { username, otp } = req.body || {};
+
+  if (!username || !otp) {
+    return res.status(400).json({ message: "Username and OTP are required" });
+  }
+
+  const findUserQuery = "SELECT id FROM users WHERE username = ?";
+  pool.execute(findUserQuery, [username], (err, rows) => {
+    if (err) {
+      console.error("Forgot verify - user lookup error:", err);
+      return res.status(500).json({ message: "Database error" });
+    }
+    if (!rows || rows.length === 0) {
+      return res.status(404).json({ message: "User not found" });
+    }
+    const userId = rows[0].id;
+
+    const checkOtpQuery =
+      "SELECT id, expires_at, used FROM password_resets WHERE user_id = ? AND otp = ? ORDER BY created_at DESC LIMIT 1";
+    pool.execute(checkOtpQuery, [userId, otp], (otpErr, otpRows) => {
+      if (otpErr) {
+        console.error("Forgot verify - otp lookup error:", otpErr);
+        return res.status(500).json({ message: "Database error" });
+      }
+      if (!otpRows || otpRows.length === 0) {
+        return res.status(400).json({ message: "Invalid OTP" });
+      }
+
+      const record = otpRows[0];
+      const isUsed = !!record.used;
+      const isExpired = new Date(record.expires_at) < new Date();
+      if (isUsed || isExpired) {
+        return res.status(400).json({ message: isUsed ? "OTP already used" : "OTP expired" });
+      }
+
+      return res.json({ message: "OTP verified" });
+    });
+  });
+});
+
+// Reset password using verified OTP
+app.post("/api/auth/forgot/reset", (req, res) => {
+  const { username, otp, newPassword } = req.body || {};
+
+  if (!username || !otp || !newPassword) {
+    return res
+      .status(400)
+      .json({ message: "Username, OTP and newPassword are required" });
+  }
+
+  // Basic password policy: 8-15 chars, at least 1 upper, 1 lower, 1 special
+  const passwordRegex = /^(?=.*[a-z])(?=.*[A-Z])(?=.*[!@#$%^&*()_+\-={}\[\]|;:'",.<>\/?`~]).{8,15}$/;
+  if (!passwordRegex.test(newPassword)) {
+    return res.status(400).json({
+      message:
+        "Password must be 8-15 characters, include at least one uppercase, one lowercase, and one special character",
+    });
+  }
+
+  const findUserQuery = "SELECT id FROM users WHERE username = ?";
+  pool.execute(findUserQuery, [username], (err, rows) => {
+    if (err) {
+      console.error("Forgot reset - user lookup error:", err);
+      return res.status(500).json({ message: "Database error" });
+    }
+    if (!rows || rows.length === 0) {
+      return res.status(404).json({ message: "User not found" });
+    }
+    const userId = rows[0].id;
+
+    const checkOtpQuery =
+      "SELECT id, expires_at, used FROM password_resets WHERE user_id = ? AND otp = ? ORDER BY created_at DESC LIMIT 1";
+    pool.execute(checkOtpQuery, [userId, otp], (otpErr, otpRows) => {
+      if (otpErr) {
+        console.error("Forgot reset - otp lookup error:", otpErr);
+        return res.status(500).json({ message: "Database error" });
+      }
+      if (!otpRows || otpRows.length === 0) {
+        return res.status(400).json({ message: "Invalid OTP" });
+      }
+
+      const record = otpRows[0];
+      const isUsed = !!record.used;
+      const isExpired = new Date(record.expires_at) < new Date();
+      if (isUsed || isExpired) {
+        return res.status(400).json({ message: isUsed ? "OTP already used" : "OTP expired" });
+      }
+
+      const updatePasswordQuery = "UPDATE users SET password = ? WHERE id = ?";
+      pool.execute(updatePasswordQuery, [newPassword, userId], (updErr) => {
+        if (updErr) {
+          console.error("Forgot reset - update password error:", updErr);
+          return res.status(500).json({ message: "Failed to update password" });
+        }
+
+        const markUsedQuery = "UPDATE password_resets SET used = 1 WHERE id = ?";
+        pool.execute(markUsedQuery, [record.id], (markErr) => {
+          if (markErr) {
+            console.error("Forgot reset - mark used error:", markErr);
+            // Not fatal
+          }
+          return res.json({ message: "Password updated successfully" });
+        });
+      });
     });
   });
 });
