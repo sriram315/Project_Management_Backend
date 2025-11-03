@@ -103,8 +103,8 @@ async function testAPIEndpoint(filters) {
     if (filters.startDate) queryParams.append('startDate', filters.startDate);
     if (filters.endDate) queryParams.append('endDate', filters.endDate);
     
-    const url = `http://localhost:5000/api/dashboard/data?${queryParams.toString()}`;
-    const taskStatusUrl = `http://localhost:5000/api/dashboard/task-status?${queryParams.toString()}`;
+    const url = `http://72.60.101.240:5000/api/dashboard/data?${queryParams.toString()}`;
+    const taskStatusUrl = `http://72.60.101.240:5000/api/dashboard/task-status?${queryParams.toString()}`;
     
     try {
         const [dashboardResponse, taskStatusResponse] = await Promise.all([
