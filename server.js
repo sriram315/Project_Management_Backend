@@ -1972,6 +1972,244 @@ app.get("/api/metrics", (req, res) => {
 //   }
 // });
 
+// app.get("/api/dashboard/data", (req, res) => {
+//   try {
+//     const { projectId, employeeId, startDate, endDate } = req.query;
+
+//     console.log("Dashboard data request:", {
+//       projectId,
+//       employeeId,
+//       startDate,
+//       endDate,
+//     });
+
+//     let whereConditions = [];
+//     let queryParams = [];
+
+//     if (projectId && projectId !== "all") {
+//       whereConditions.push("t.project_id = ?");
+//       queryParams.push(projectId);
+//     }
+
+//     if (employeeId && employeeId !== "all") {
+//       whereConditions.push("t.assignee_id = ?");
+//       queryParams.push(employeeId);
+//     }
+
+//     if (startDate) {
+//       whereConditions.push("DATE(t.due_date) >= ?");
+//       queryParams.push(startDate);
+//     }
+
+//     if (endDate) {
+//       whereConditions.push("DATE(t.due_date) <= ?");
+//       queryParams.push(endDate);
+//     }
+
+//     const whereClause =
+//       whereConditions.length > 0
+//         ? `WHERE ${whereConditions.join(" AND ")}`
+//         : "";
+
+//     // ✅ Utilization Query
+//     const utilizationQuery = `
+//       SELECT 
+//         week,
+//         SUM(planned_hours) as planned_hours,
+//         SUM(user_available_hours) as available_hours,
+//         ROUND((SUM(planned_hours) / NULLIF(SUM(user_available_hours), 0)) * 100, 1) as utilization_percentage
+//       FROM (
+//         SELECT 
+//           DATE_FORMAT(t.due_date, '%Y-W%u') as week,
+//           t.assignee_id,
+//           SUM(t.planned_hours) as planned_hours,
+//           MAX(u.available_hours_per_week) as user_available_hours
+//         FROM tasks t
+//         JOIN users u ON t.assignee_id = u.id
+//         ${whereClause}
+//         GROUP BY DATE_FORMAT(t.due_date, '%Y-W%u'), t.assignee_id
+//       ) as employee_utilization
+//       GROUP BY week
+//       ORDER BY week ASC
+//     `;
+
+//     // ✅ Productivity Query
+//     const productivityQuery = `
+//       SELECT 
+//         DATE_FORMAT(t.due_date, '%Y-W%u') as week,
+//         COUNT(CASE WHEN t.status = 'completed' THEN 1 END) as completed_tasks,
+//         SUM(t.actual_hours) as actual_hours,
+//         SUM(t.planned_hours) as planned_hours,
+//         ROUND((SUM(t.actual_hours) / NULLIF(SUM(t.planned_hours), 0)) * 100, 1) as productivity_percentage
+//       FROM tasks t
+//       JOIN users u ON t.assignee_id = u.id
+//       ${whereClause}
+//       GROUP BY DATE_FORMAT(t.due_date, '%Y-W%u')
+//       ORDER BY week ASC
+//     `;
+
+//     // ✅ Availability Query
+//     const availabilityQuery = `
+//       SELECT 
+//         week,
+//         SUM(user_available_hours - total_planned_hours) as available_hours
+//       FROM (
+//         SELECT 
+//           DATE_FORMAT(t.due_date, '%Y-W%u') as week,
+//           t.assignee_id,
+//           MAX(u.available_hours_per_week) as user_available_hours,
+//           SUM(t.planned_hours) as total_planned_hours
+//         FROM tasks t
+//         JOIN users u ON t.assignee_id = u.id
+//         ${whereClause}
+//         GROUP BY DATE_FORMAT(t.due_date, '%Y-W%u'), t.assignee_id
+//       ) as employee_weekly_hours
+//       GROUP BY week
+//       ORDER BY week ASC
+//     `;
+
+//     // Execute all queries
+//     pool.execute(utilizationQuery, queryParams, (err, utilizationRows) => {
+//       if (err) {
+//         console.error("Utilization query error:", err);
+//         return res
+//           .status(500)
+//           .json({ error: "Database error", details: err.message });
+//       }
+
+//       pool.execute(productivityQuery, queryParams, (err, productivityRows) => {
+//         if (err) {
+//           console.error("Productivity query error:", err);
+//           return res
+//             .status(500)
+//             .json({ error: "Database error", details: err.message });
+//         }
+
+//         pool.execute(
+//           availabilityQuery,
+//           queryParams,
+//           (err, availabilityRows) => {
+//             if (err) {
+//               console.error("Availability query error:", err);
+//               return res
+//                 .status(500)
+//                 .json({ error: "Database error", details: err.message });
+//             }
+
+//             console.log("Utilization rows:", utilizationRows.length);
+//             console.log("Productivity rows:", productivityRows.length);
+//             console.log("Availability rows:", availabilityRows.length);
+
+//             // ✅ Format individual datasets
+//             const utilizationData = utilizationRows.map((row) => ({
+//               week: row.week,
+//               utilization: parseFloat(row.utilization_percentage) || 0,
+//               availableHours: parseInt(row.available_hours) || 0,
+//             }));
+
+//             const productivityData = productivityRows.map((row) => ({
+//               week: row.week,
+//               completed: parseInt(row.completed_tasks) || 0,
+//               hours: parseFloat(row.actual_hours) || 0,
+//               productivity: parseFloat(row.productivity_percentage) || 0,
+//               plannedHours: parseFloat(row.planned_hours) || 0,
+//             }));
+
+//             const availabilityData = availabilityRows.map((row) => ({
+//               week: row.week,
+//               availableHours: parseInt(row.available_hours) || 0,
+//             }));
+
+//             // ✅ Generate all weeks in range (fill missing)
+//             function generateWeekRange(start, end) {
+//               const result = [];
+//               const startDateObj = new Date(start);
+//               const endDateObj = new Date(end);
+
+//               const curr = new Date(startDateObj);
+//               curr.setDate(curr.getDate() - curr.getDay() + 1);
+
+//               while (curr <= endDateObj) {
+//                 const year = curr.getFullYear();
+//                 const week = getWeekNumber(curr);
+//                 result.push(`${year}-W${week.toString().padStart(2, "0")}`);
+//                 curr.setDate(curr.getDate() + 7);
+//               }
+
+//               return result;
+//             }
+
+//             function getWeekNumber(d) {
+//               d = new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()));
+//               const dayNum = d.getUTCDay() || 7;
+//               d.setUTCDate(d.getUTCDate() + 4 - dayNum);
+//               const yearStart = new Date(Date.UTC(d.getUTCFullYear(), 0, 1));
+//               return Math.ceil(((d - yearStart) / 86400000 + 1) / 7);
+//             }
+
+//             const allWeeks =
+//               startDate && endDate
+//                 ? generateWeekRange(startDate, endDate)
+//                 : Array.from(
+//                     new Set([
+//                       ...utilizationData.map((d) => d.week),
+//                       ...productivityData.map((d) => d.week),
+//                       ...availabilityData.map((d) => d.week),
+//                     ])
+//                   );
+
+//             // ✅ Merge all datasets ensuring full week coverage
+//             const mergedData = allWeeks.map((week) => {
+//               const util = utilizationData.find((d) => d.week === week) || {
+//                 utilization: 0,
+//                 availableHours: 0,
+//               };
+//               const prod = productivityData.find((d) => d.week === week) || {
+//                 completed: 0,
+//                 hours: 0,
+//                 productivity: 0,
+//                 plannedHours: 0,
+//               };
+//               const avail = availabilityData.find((d) => d.week === week) || {
+//                 availableHours: 0,
+//               };
+
+//               return {
+//                 week,
+//                 utilization: util.utilization,
+//                 completed: prod.completed,
+//                 hours: prod.hours,
+//                 productivity: prod.productivity,
+//                 plannedHours: prod.plannedHours,
+//                 availableHours:
+//                   avail.availableHours || util.availableHours || 0,
+//               };
+//             });
+
+//             console.log(
+//               "Merged data weeks:",
+//               mergedData.map((d) => d.week)
+//             );
+
+//             res.json({
+//               utilizationData: mergedData,
+//               productivityData: mergedData,
+//               availabilityData: mergedData,
+//             });
+//           }
+//         );
+//       });
+//     });
+//   } catch (error) {
+//     console.error("Dashboard data error:", error);
+//     res.json({
+//       utilizationData: [],
+//       productivityData: [],
+//       availabilityData: [],
+//     });
+//   }
+// });
+
 app.get("/api/dashboard/data", (req, res) => {
   try {
     const { projectId, employeeId, startDate, endDate } = req.query;
@@ -2011,19 +2249,20 @@ app.get("/api/dashboard/data", (req, res) => {
         ? `WHERE ${whereConditions.join(" AND ")}`
         : "";
 
-    // ✅ Utilization Query
+    // ✅ Fixed Utilization Query (per employee, then aggregated by week)
     const utilizationQuery = `
       SELECT 
         week,
+        ROUND(AVG(employee_utilization), 1) as utilization_percentage,
         SUM(planned_hours) as planned_hours,
-        SUM(user_available_hours) as available_hours,
-        ROUND((SUM(planned_hours) / NULLIF(SUM(user_available_hours), 0)) * 100, 1) as utilization_percentage
+        SUM(available_hours) as available_hours
       FROM (
         SELECT 
           DATE_FORMAT(t.due_date, '%Y-W%u') as week,
           t.assignee_id,
           SUM(t.planned_hours) as planned_hours,
-          MAX(u.available_hours_per_week) as user_available_hours
+          MAX(u.available_hours_per_week) as available_hours,
+          ROUND((SUM(t.planned_hours) / NULLIF(MAX(u.available_hours_per_week), 0)) * 100, 1) as employee_utilization
         FROM tasks t
         JOIN users u ON t.assignee_id = u.id
         ${whereClause}
@@ -2033,7 +2272,7 @@ app.get("/api/dashboard/data", (req, res) => {
       ORDER BY week ASC
     `;
 
-    // ✅ Productivity Query
+    // ✅ Productivity Query (unchanged)
     const productivityQuery = `
       SELECT 
         DATE_FORMAT(t.due_date, '%Y-W%u') as week,
@@ -2048,21 +2287,49 @@ app.get("/api/dashboard/data", (req, res) => {
       ORDER BY week ASC
     `;
 
-    // ✅ Availability Query
+    // ✅ Fixed Availability Query (allow negative for overutilization, return available_hours_per_week if no tasks in specific weeks)
     const availabilityQuery = `
       SELECT 
         week,
-        SUM(user_available_hours - total_planned_hours) as available_hours
+        SUM(CASE 
+          WHEN COALESCE(planned_hours, 0) = 0 THEN available_hours
+          ELSE available_hours - planned_hours
+        END) as available_hours
       FROM (
         SELECT 
           DATE_FORMAT(t.due_date, '%Y-W%u') as week,
           t.assignee_id,
-          MAX(u.available_hours_per_week) as user_available_hours,
-          SUM(t.planned_hours) as total_planned_hours
+          MAX(u.available_hours_per_week) as available_hours,
+          COALESCE(SUM(t.planned_hours), 0) as planned_hours
         FROM tasks t
         JOIN users u ON t.assignee_id = u.id
         ${whereClause}
         GROUP BY DATE_FORMAT(t.due_date, '%Y-W%u'), t.assignee_id
+        UNION ALL
+        SELECT 
+          DATE_FORMAT(DATE_ADD(STR_TO_DATE('${startDate}', '%Y-%m-%d'), INTERVAL (seq.i) DAY), '%Y-W%u') as week,
+          u.id as assignee_id,
+          u.available_hours_per_week as available_hours,
+          0 as planned_hours
+        FROM users u
+        CROSS JOIN (
+          WITH RECURSIVE seq AS (
+            SELECT 0 as i
+            UNION ALL
+            SELECT i + 1 FROM seq WHERE i < DATEDIFF(STR_TO_DATE('${endDate}', '%Y-%m-%d'), STR_TO_DATE('${startDate}', '%Y-%m-%d'))
+          )
+          SELECT * FROM seq
+        ) seq
+        WHERE DATE_FORMAT(DATE_ADD(STR_TO_DATE('${startDate}', '%Y-%m-%d'), INTERVAL (seq.i) DAY), '%Y-W%u') NOT IN (
+          SELECT DISTINCT DATE_FORMAT(t.due_date, '%Y-W%u')
+          FROM tasks t 
+          WHERE DATE(t.due_date) >= '${startDate}' 
+          AND DATE(t.due_date) <= '${endDate}'
+          ${employeeId && employeeId !== "all" ? `AND t.assignee_id = ${employeeId}` : ""}
+        )
+        AND DATE_ADD(STR_TO_DATE('${startDate}', '%Y-%m-%d'), INTERVAL (seq.i) DAY) <= STR_TO_DATE('${endDate}', '%Y-%m-%d')
+        ${employeeId && employeeId !== "all" ? `AND u.id = ${employeeId}` : ""}
+        GROUP BY DATE_FORMAT(DATE_ADD(STR_TO_DATE('${startDate}', '%Y-%m-%d'), INTERVAL (seq.i) DAY), '%Y-W%u'), u.id
       ) as employee_weekly_hours
       GROUP BY week
       ORDER BY week ASC
@@ -2105,6 +2372,7 @@ app.get("/api/dashboard/data", (req, res) => {
               week: row.week,
               utilization: parseFloat(row.utilization_percentage) || 0,
               availableHours: parseInt(row.available_hours) || 0,
+              plannedHours: parseInt(row.planned_hours) || 0,
             }));
 
             const productivityData = productivityRows.map((row) => ({
@@ -2117,7 +2385,7 @@ app.get("/api/dashboard/data", (req, res) => {
 
             const availabilityData = availabilityRows.map((row) => ({
               week: row.week,
-              availableHours: parseInt(row.available_hours) || 0,
+              availableHours: parseInt(row.available_hours) || 0, // Allow negative for overutilization
             }));
 
             // ✅ Generate all weeks in range (fill missing)
@@ -2163,6 +2431,7 @@ app.get("/api/dashboard/data", (req, res) => {
               const util = utilizationData.find((d) => d.week === week) || {
                 utilization: 0,
                 availableHours: 0,
+                plannedHours: 0,
               };
               const prod = productivityData.find((d) => d.week === week) || {
                 completed: 0,
@@ -2181,8 +2450,7 @@ app.get("/api/dashboard/data", (req, res) => {
                 hours: prod.hours,
                 productivity: prod.productivity,
                 plannedHours: prod.plannedHours,
-                availableHours:
-                  avail.availableHours || util.availableHours || 0,
+                availableHours: avail.availableHours,
               };
             });
 
@@ -2209,7 +2477,6 @@ app.get("/api/dashboard/data", (req, res) => {
     });
   }
 });
-
 
 // Get projects for filter dropdown
 app.get("/api/dashboard/projects", (req, res) => {
