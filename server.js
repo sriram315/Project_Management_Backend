@@ -2328,20 +2328,20 @@ app.get("/api/dashboard/data", (req, res) => {
         ? `WHERE ${whereConditions.join(" AND ")}`
         : "";
 
-    // ✅ Fixed Utilization Query (per employee, then aggregated by week)
+    // ✅ Utilization Query: (planned_hours / available_hours) * 100
+    // Simple calculation: total planned hours vs total available hours per week
     const utilizationQuery = `
       SELECT 
         week,
-        ROUND(AVG(employee_utilization), 1) as utilization_percentage,
         SUM(planned_hours) as planned_hours,
-        SUM(available_hours) as available_hours
+        SUM(available_hours) as available_hours,
+        ROUND((SUM(planned_hours) / NULLIF(SUM(available_hours), 0)) * 100, 1) as utilization_percentage
       FROM (
         SELECT 
           DATE_FORMAT(t.due_date, '%Y-W%u') as week,
           t.assignee_id,
           SUM(t.planned_hours) as planned_hours,
-          MAX(u.available_hours_per_week) as available_hours,
-          ROUND((SUM(t.planned_hours) / NULLIF(MAX(u.available_hours_per_week), 0)) * 100, 1) as employee_utilization
+          MAX(u.available_hours_per_week) as available_hours
         FROM tasks t
         JOIN users u ON t.assignee_id = u.id
         ${whereClause}
@@ -2351,14 +2351,28 @@ app.get("/api/dashboard/data", (req, res) => {
       ORDER BY week ASC
     `;
 
-    // ✅ Productivity Query (unchanged)
+    // ✅ Productivity Query: Calculate total actual vs planned hours percentage
+    // For all projects/employees: SUM(actual_hours) / SUM(planned_hours) * 100
+    // If productivity_rating exists for tasks, use weighted average: SUM(rating * planned_hours) / SUM(planned_hours)
+    // Otherwise calculate: SUM(actual_hours) / SUM(planned_hours) * 100
     const productivityQuery = `
       SELECT 
         DATE_FORMAT(t.due_date, '%Y-W%u') as week,
         COUNT(CASE WHEN t.status = 'completed' THEN 1 END) as completed_tasks,
         SUM(t.actual_hours) as actual_hours,
         SUM(t.planned_hours) as planned_hours,
-        ROUND((SUM(t.actual_hours) / NULLIF(SUM(t.planned_hours), 0)) * 100, 1) as productivity_percentage
+        CASE 
+          WHEN SUM(CASE WHEN t.productivity_rating IS NOT NULL THEN t.planned_hours ELSE 0 END) > 0 THEN
+            -- Use weighted average: SUM(rating * planned_hours) / SUM(planned_hours) for tasks with rating
+            ROUND(
+              SUM(CASE WHEN t.productivity_rating IS NOT NULL THEN t.productivity_rating * t.planned_hours ELSE 0 END) / 
+              NULLIF(SUM(CASE WHEN t.productivity_rating IS NOT NULL THEN t.planned_hours ELSE 0 END), 0),
+              1
+            )
+          ELSE
+            -- Calculate overall: SUM(actual_hours) / SUM(planned_hours) * 100
+            ROUND((SUM(t.actual_hours) / NULLIF(SUM(t.planned_hours), 0)) * 100, 1)
+        END as productivity_percentage
       FROM tasks t
       JOIN users u ON t.assignee_id = u.id
       ${whereClause}
@@ -2366,53 +2380,91 @@ app.get("/api/dashboard/data", (req, res) => {
       ORDER BY week ASC
     `;
 
-    // ✅ Fixed Availability Query (allow negative for overutilization, return available_hours_per_week if no tasks in specific weeks)
+    // ✅ Team Availability Query: Total Available Hours - Planned Hours per week
+    // Formula: SUM(users.available_hours_per_week) - SUM(tasks.planned_hours WHERE due_date in that week)
+    // Positive values = available hours, Negative values = overutilized hours (shown as red bars in chart)
+    
+    // Build user filter based on project and employee filters
+    let userFilterConditions = [];
+    let availabilityUserParams = [];
+    
+    if (employeeId && employeeId !== "all") {
+      // Filter by specific employee
+      userFilterConditions.push("u.id = ?");
+      availabilityUserParams.push(employeeId);
+    } else if (projectId && projectId !== "all") {
+      // Filter by employees assigned to specific project via project_team_members
+      userFilterConditions.push("u.id IN (SELECT user_id FROM project_team_members WHERE project_id = ?)");
+      availabilityUserParams.push(projectId);
+    }
+    // If no filters, include all users
+    
+    const userFilterClause = userFilterConditions.length > 0 
+      ? `WHERE ${userFilterConditions.join(" AND ")}`
+      : "";
+    
+    // Get total available hours per week (sum of all relevant users' available_hours_per_week)
+    // Include ALL tasks for that week (even completed ones) - no status filter
+    // Formula: SUM(users.available_hours_per_week) - SUM(tasks.planned_hours)
+    
+    // First, calculate total available hours from relevant users (run this as separate query first)
+    let totalAvailableQuery = "";
+    let totalAvailableParams = [];
+    
+    if (employeeId && employeeId !== "all") {
+      // Single employee
+      totalAvailableQuery = "SELECT COALESCE(SUM(available_hours_per_week), 0) as total FROM users WHERE id = ?";
+      totalAvailableParams = [employeeId];
+    } else if (projectId && projectId !== "all") {
+      // Employees assigned to project
+      totalAvailableQuery = `
+        SELECT COALESCE(SUM(u.available_hours_per_week), 0) as total
+        FROM users u
+        INNER JOIN project_team_members ptm ON u.id = ptm.user_id
+        WHERE ptm.project_id = ?
+      `;
+      totalAvailableParams = [projectId];
+    } else {
+      // All users
+      totalAvailableQuery = "SELECT COALESCE(SUM(available_hours_per_week), 0) as total FROM users";
+      totalAvailableParams = [];
+    }
+    
+    // Simplified approach: Calculate availability per week directly
+    // Return negative values for overutilization (when planned > available)
+    // Positive values = available hours, Negative values = overutilized hours
     const availabilityQuery = `
       SELECT 
         week,
-        SUM(CASE 
-          WHEN COALESCE(planned_hours, 0) = 0 THEN available_hours
-          ELSE available_hours - planned_hours
-        END) as available_hours
+        COALESCE(?, 0) - COALESCE(SUM(total_planned_hours), 0) as available_hours
       FROM (
+        -- Get weeks from tasks with 0 planned hours
         SELECT 
           DATE_FORMAT(t.due_date, '%Y-W%u') as week,
-          t.assignee_id,
-          MAX(u.available_hours_per_week) as available_hours,
-          COALESCE(SUM(t.planned_hours), 0) as planned_hours
+          0 as total_planned_hours
         FROM tasks t
-        JOIN users u ON t.assignee_id = u.id
         ${whereClause}
-        GROUP BY DATE_FORMAT(t.due_date, '%Y-W%u'), t.assignee_id
+        GROUP BY DATE_FORMAT(t.due_date, '%Y-W%u')
+        
         UNION ALL
+        
+        -- Get total planned hours from ALL tasks for each week (no status filter - includes completed)
         SELECT 
-          DATE_FORMAT(DATE_ADD(STR_TO_DATE('${startDate}', '%Y-%m-%d'), INTERVAL (seq.i) DAY), '%Y-W%u') as week,
-          u.id as assignee_id,
-          u.available_hours_per_week as available_hours,
-          0 as planned_hours
-        FROM users u
-        CROSS JOIN (
-          WITH RECURSIVE seq AS (
-            SELECT 0 as i
-            UNION ALL
-            SELECT i + 1 FROM seq WHERE i < DATEDIFF(STR_TO_DATE('${endDate}', '%Y-%m-%d'), STR_TO_DATE('${startDate}', '%Y-%m-%d'))
-          )
-          SELECT * FROM seq
-        ) seq
-        WHERE DATE_FORMAT(DATE_ADD(STR_TO_DATE('${startDate}', '%Y-%m-%d'), INTERVAL (seq.i) DAY), '%Y-W%u') NOT IN (
-          SELECT DISTINCT DATE_FORMAT(t.due_date, '%Y-W%u')
-          FROM tasks t 
-          WHERE DATE(t.due_date) >= '${startDate}' 
-          AND DATE(t.due_date) <= '${endDate}'
-          ${employeeId && employeeId !== "all" ? `AND t.assignee_id = ${employeeId}` : ""}
-        )
-        AND DATE_ADD(STR_TO_DATE('${startDate}', '%Y-%m-%d'), INTERVAL (seq.i) DAY) <= STR_TO_DATE('${endDate}', '%Y-%m-%d')
-        ${employeeId && employeeId !== "all" ? `AND u.id = ${employeeId}` : ""}
-        GROUP BY DATE_FORMAT(DATE_ADD(STR_TO_DATE('${startDate}', '%Y-%m-%d'), INTERVAL (seq.i) DAY), '%Y-W%u'), u.id
-      ) as employee_weekly_hours
+          DATE_FORMAT(t.due_date, '%Y-W%u') as week,
+          SUM(t.planned_hours) as total_planned_hours
+        FROM tasks t
+        ${whereClause}
+        GROUP BY DATE_FORMAT(t.due_date, '%Y-W%u')
+      ) as availability_calc
       GROUP BY week
       ORDER BY week ASC
     `;
+    
+    // Params: total available hours + where clause params for tasks (used twice in UNION ALL)
+    const availabilityParamsBase = [
+      ...queryParams,  // For tasks in first part (weeks list)
+      ...queryParams   // For tasks in second part (planned hours)
+    ];
 
     // Execute all queries
     pool.execute(utilizationQuery, queryParams, (err, utilizationRows) => {
@@ -2431,41 +2483,67 @@ app.get("/api/dashboard/data", (req, res) => {
             .json({ error: "Database error", details: err.message });
         }
 
-        pool.execute(
-          availabilityQuery,
-          queryParams,
-          (err, availabilityRows) => {
-            if (err) {
-              console.error("Availability query error:", err);
-              return res
-                .status(500)
-                .json({ error: "Database error", details: err.message });
-            }
+        // First, get total available hours from relevant users
+        pool.execute(totalAvailableQuery, totalAvailableParams, (err, totalAvailableRows) => {
+          if (err) {
+            console.error("Total available hours query error:", err);
+            return res
+              .status(500)
+              .json({ error: "Database error", details: err.message });
+          }
+          
+          const totalAvailableHours = parseFloat(totalAvailableRows[0]?.total) || 0;
+          console.log("Total Available Hours (from users):", totalAvailableHours);
+          console.log("Total Available Query:", totalAvailableQuery);
+          console.log("Total Available Params:", totalAvailableParams);
+          
+          // Now execute availability query with total available hours as first param
+          const availabilityParams = [totalAvailableHours, ...availabilityParamsBase];
+          
+          console.log("Availability Query:", availabilityQuery.replace(/\s+/g, ' ').substring(0, 500));
+          console.log("Availability Params Count:", availabilityParams.length);
+          console.log("Availability Params:", availabilityParams);
+          
+          pool.execute(
+            availabilityQuery,
+            availabilityParams,
+            (err, availabilityRows) => {
+              if (err) {
+                console.error("Availability query error:", err);
+                return res
+                  .status(500)
+                  .json({ error: "Database error", details: err.message });
+              }
+              
+              console.log("Availability Raw Results:", availabilityRows);
 
-            console.log("Utilization rows:", utilizationRows.length);
-            console.log("Productivity rows:", productivityRows.length);
-            console.log("Availability rows:", availabilityRows.length);
+              console.log("Utilization rows:", utilizationRows.length);
+              console.log("Productivity rows:", productivityRows.length);
+              console.log("Availability rows:", availabilityRows.length);
 
-            // ✅ Format individual datasets
-            const utilizationData = utilizationRows.map((row) => ({
-              week: row.week,
-              utilization: parseFloat(row.utilization_percentage) || 0,
-              availableHours: parseInt(row.available_hours) || 0,
-              plannedHours: parseInt(row.planned_hours) || 0,
-            }));
+              // ✅ Format individual datasets
+              const utilizationData = utilizationRows.map((row) => ({
+                week: row.week,
+                utilization: parseFloat(row.utilization_percentage) || 0,
+                availableHours: parseInt(row.available_hours) || 0,
+                plannedHours: parseInt(row.planned_hours) || 0,
+              }));
 
-            const productivityData = productivityRows.map((row) => ({
-              week: row.week,
-              completed: parseInt(row.completed_tasks) || 0,
-              hours: parseFloat(row.actual_hours) || 0,
-              productivity: parseFloat(row.productivity_percentage) || 0,
-              plannedHours: parseFloat(row.planned_hours) || 0,
-            }));
+              const productivityData = productivityRows.map((row) => ({
+                week: row.week,
+                completed: parseInt(row.completed_tasks) || 0,
+                hours: parseFloat(row.actual_hours) || 0,
+                productivity: parseFloat(row.productivity_percentage) || 0,
+                plannedHours: parseFloat(row.planned_hours) || 0,
+              }));
 
-            const availabilityData = availabilityRows.map((row) => ({
-              week: row.week,
-              availableHours: parseInt(row.available_hours) || 0, // Allow negative for overutilization
-            }));
+              const availabilityData = availabilityRows.map((row) => {
+                const hours = parseFloat(row.available_hours) || 0;
+                return {
+                  week: row.week,
+                  availableHours: hours,
+                };
+              });
 
             // ✅ Generate all weeks in range (fill missing)
             function generateWeekRange(start, end) {
@@ -2505,38 +2583,43 @@ app.get("/api/dashboard/data", (req, res) => {
                     ])
                   );
 
-            // ✅ Merge all datasets ensuring full week coverage
-            const mergedData = allWeeks.map((week) => {
-              const util = utilizationData.find((d) => d.week === week) || {
-                utilization: 0,
-                availableHours: 0,
-                plannedHours: 0,
-              };
-              const prod = productivityData.find((d) => d.week === week) || {
-                completed: 0,
-                hours: 0,
-                productivity: 0,
-                plannedHours: 0,
-              };
-              const avail = availabilityData.find((d) => d.week === week) || {
-                availableHours: 0,
-              };
+              // ✅ Merge all datasets ensuring full week coverage
+              // For weeks with no tasks, use totalAvailableHours as availableHours
+              const mergedData = allWeeks.map((week) => {
+                const util = utilizationData.find((d) => d.week === week) || {
+                  utilization: 0,
+                  availableHours: 0,
+                  plannedHours: 0,
+                };
+                const prod = productivityData.find((d) => d.week === week) || {
+                  completed: 0,
+                  hours: 0,
+                  productivity: 0,
+                  plannedHours: 0,
+                };
+                const avail = availabilityData.find((d) => d.week === week);
+                
+                // If no tasks for this week, availability = total available hours
+                // Otherwise use calculated availability (can be negative for overutilization)
+                const availableHours = avail 
+                  ? avail.availableHours 
+                  : totalAvailableHours; // Use total available hours if no tasks in this week
 
-              return {
-                week,
-                utilization: util.utilization,
-                completed: prod.completed,
-                hours: prod.hours,
-                productivity: prod.productivity,
-                plannedHours: prod.plannedHours,
-                availableHours: avail.availableHours,
-              };
-            });
+                return {
+                  week,
+                  utilization: util.utilization,
+                  completed: prod.completed,
+                  hours: prod.hours,
+                  productivity: prod.productivity,
+                  plannedHours: prod.plannedHours,
+                  availableHours: availableHours,
+                };
+              });
 
-            console.log(
-              "Merged data weeks:",
-              mergedData.map((d) => d.week)
-            );
+              console.log(
+                "Merged data weeks:",
+                mergedData.map((d) => d.week)
+              );
 
             res.json({
               utilizationData: mergedData,
@@ -2545,6 +2628,7 @@ app.get("/api/dashboard/data", (req, res) => {
             });
           }
         );
+        });
       });
     });
   } catch (error) {
@@ -2570,12 +2654,35 @@ app.get("/api/dashboard/projects", (req, res) => {
   });
 });
 
-// Get employees for filter dropdown
+// Get employees for filter dropdown (optionally filtered by project)
 app.get("/api/dashboard/employees", (req, res) => {
-  const query =
-    "SELECT id, username, email, role, available_hours_per_week FROM users ORDER BY username";
+  const { projectId } = req.query;
 
-  pool.execute(query, (err, results) => {
+  let query;
+  let params = [];
+
+  if (projectId && projectId !== "all" && projectId !== undefined) {
+    // If projectId is provided, only return employees assigned to that project
+    query = `
+      SELECT DISTINCT 
+        u.id, 
+        u.username, 
+        u.email, 
+        u.role, 
+        u.available_hours_per_week 
+      FROM users u
+      INNER JOIN project_team_members ptm ON u.id = ptm.user_id
+      WHERE ptm.project_id = ?
+      ORDER BY u.username
+    `;
+    params = [projectId];
+  } else {
+    // Return all employees if no project filter
+    query =
+      "SELECT id, username, email, role, available_hours_per_week FROM users ORDER BY username";
+  }
+
+  pool.execute(query, params, (err, results) => {
     if (err) {
       console.error("Employees filter error:", err);
       return res.status(500).json({ error: "Failed to fetch employees" });
