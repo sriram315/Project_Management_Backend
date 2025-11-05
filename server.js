@@ -275,26 +275,34 @@ app.get("/api/test", (req, res) => {
  *               $ref: '#/components/schemas/Error'
  */
 app.post("/api/auth/login", (req, res) => {
-  const { username, password } = req.body;
-
-  const query = "SELECT * FROM users WHERE username = ? AND password = ?";
-
-  pool.execute(query, [username, password], (err, results) => {
-    if (err) {
-      console.error("Login error:", err);
-      return res.status(500).json({ message: "Database error" });
+  // Unified login: match by email OR username with one query, avoid multiple DB calls
+  try {
+    const { email, username, password } = req.body || {};
+    const identifier = email || username;
+    if (!identifier || !password) {
+      return res.status(400).json({ message: "Email and password are required" });
     }
 
-    if (results.length === 0) {
+    const query =
+      "SELECT id, username, role FROM users WHERE (email = ? OR username = ?) AND password = ? LIMIT 1";
+    pool.execute(query, [identifier, identifier, password], (err, rows) => {
+      if (err) {
+        console.error("Login DB error:", { code: err.code, message: err.message });
+        return res.status(500).json({ message: "Database error" });
+      }
+      if (rows && rows.length > 0) {
+        return res.status(200).json({
+          id: rows[0].id,
+          username: rows[0].username,
+          role: rows[0].role,
+        });
+      }
       return res.status(401).json({ message: "Invalid credentials" });
-    }
-
-    res.json({
-      id: results[0].id,
-      username: results[0].username,
-      role: results[0].role,
     });
-  });
+  } catch (e) {
+    console.error("Login unexpected error:", e);
+    return res.status(500).json({ message: "Server error" });
+  }
 });
 
 // Start password reset - generate OTP and email it to user's registered email
@@ -883,7 +891,15 @@ app.get("/api/projects", (req, res) => {
       console.error("Projects fetch error:", err);
       return res.status(500).json({ message: "Database error" });
     }
-    res.json(results);
+    // Normalize status values for clients
+    const normalized = (results || []).map((row) => {
+      const raw = (row.status || '').toLowerCase();
+      let status = raw;
+      if (raw === 'on_hold' || raw === 'cancelled') status = 'inactive';
+      if (raw === 'planning') status = 'active';
+      return { ...row, status };
+    });
+    res.json(normalized);
   });
 });
 
@@ -997,7 +1013,12 @@ app.post("/api/projects", (req, res) => {
 // Update project
 app.put("/api/projects/:id", (req, res) => {
   const { id } = req.params;
-  const updateData = req.body;
+  const updateData = { ...req.body };
+  // Accept friendly 'inactive' and convert to DB-compatible value
+  if (updateData.status === 'inactive') {
+    // Prefer on_hold; if schema doesn't support it, treat at least consistently on read via normalization
+    updateData.status = 'on_hold';
+  }
 
   // Build dynamic query based on provided fields
   const fields = [];
