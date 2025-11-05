@@ -1,0 +1,51 @@
+# .github/workflows/deploy.yml
+name: Deploy Project Management Backend
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Upload project to VM
+        uses: appleboy/scp-action@v0.1.4
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          password: ${{ secrets.SSH_PASSWORD }}
+          port: ${{ secrets.SSH_PORT || 22 }}
+          source: "."
+          target: "~/app-pm-backend"
+          overwrite: true
+          rm: true
+
+      - name: Build & run container on VM
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          password: ${{ secrets.SSH_PASSWORD }}
+          port: ${{ secrets.SSH_PORT || 22 }}
+          envs: GITHUB_SHA
+          script: |
+            set -e
+            cd ~/app-pm-backend
+
+            docker stop pm-backend || true
+            docker rm pm-backend || true
+
+            docker build -t pm-backend:${GITHUB_SHA} .
+
+            docker run -d --name pm-backend \
+              --restart unless-stopped \
+              -p 5005:5005 \
+              pm-backend:${GITHUB_SHA}
+
+            docker image prune -f
