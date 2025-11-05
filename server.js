@@ -1,10 +1,11 @@
 const express = require("express");
 const cors = require("cors");
-const mysql = require("mysql2");
 const path = require("path");
 const swaggerJsdoc = require("swagger-jsdoc");
 const swaggerUi = require("swagger-ui-express");
 const nodemailer = require("nodemailer");
+const cron = require("node-cron");
+const pool = require("./config/db"); // Database config from centralized location
 
 const app = express();
 
@@ -126,31 +127,7 @@ app.use(
   })
 );
 
-// Database connection pool
-const pool = mysql.createPool({
-  host: "217.21.90.204",
-  user: "u635298195_pmp",
-  password: ">1BC/=Nf1",
-  database: "u635298195_pmp",
-  port: 3306,
-  charset: "utf8mb4", // Support for all Unicode characters including emojis
-  waitForConnections: true,
-  connectionLimit: 10,
-  queueLimit: 0,
-  acquireTimeout: 60000,
-  timeout: 60000,
-});
-
-// Test connection
-pool.getConnection((err, connection) => {
-  if (err) {
-    console.error("Database connection failed:", err.message);
-    console.log("Using mock data fallback...");
-  } else {
-    console.log("Successfully connected to MySQL database!");
-    connection.release();
-  }
-});
+// Database connection pool is imported from config/db.js
 
 // Create password_resets table if not exists (for OTP storage)
 pool.execute(
@@ -173,29 +150,306 @@ pool.execute(
   }
 );
 
+// Create task_reminders table if not exists (to track sent reminders)
+pool.execute(
+  `CREATE TABLE IF NOT EXISTS task_reminders (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    task_id INT NOT NULL,
+    reminder_type ENUM('before_due', 'overdue') NOT NULL,
+    sent_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    INDEX(task_id),
+    INDEX(reminder_type),
+    CONSTRAINT fk_task_reminders_task FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE,
+    UNIQUE KEY unique_task_reminder (task_id, reminder_type)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+  (tableErr) => {
+    if (tableErr) {
+      console.error("Failed to ensure task_reminders table:", tableErr.message);
+    } else {
+      console.log("task_reminders table is ready");
+    }
+  }
+);
+
 // Configure nodemailer transporter for Gmail SMTP (dummy placeholders)
+const GMAIL_USER = "itsupport@ifocussystec.com";
 const transporter = nodemailer.createTransport({
   service: "gmail",
   auth: {
-    user:"itsupport@ifocussystec.com",
-    pass:"pzfx dmhd mxmn vxdj",
+    user: GMAIL_USER,
+    pass: "pzfx dmhd mxmn vxdj",
   },
 });
 
-async function sendOtpEmail(toEmail, username, otp) {
+// Generate a random password that meets requirements: 8-15 chars, 1 upper, 1 lower, 1 special
+function generateRandomPassword() {
+  const uppercase = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+  const lowercase = "abcdefghijklmnopqrstuvwxyz";
+  const numbers = "0123456789";
+  const special = "!@#$%^&*()_+-=[]{}|;:'\",.<>?`~";
+  
+  // Ensure at least one of each required character
+  let password = uppercase[Math.floor(Math.random() * uppercase.length)];
+  password += lowercase[Math.floor(Math.random() * lowercase.length)];
+  password += numbers[Math.floor(Math.random() * numbers.length)];
+  password += special[Math.floor(Math.random() * special.length)];
+  
+  // Fill the rest randomly (total length 12-15)
+  const allChars = uppercase + lowercase + numbers + special;
+  const length = 8 + Math.floor(Math.random() * 8); // 8-15 characters
+  for (let i = password.length; i < length; i++) {
+    password += allChars[Math.floor(Math.random() * allChars.length)];
+  }
+  
+  // Shuffle the password
+  return password.split('').sort(() => Math.random() - 0.5).join('');
+}
+
+async function sendPasswordEmail(toEmail, username, password) {
   try {
+    console.log(`Attempting to send password reset email to: ${toEmail}`);
     const info = await transporter.sendMail({
-      from: process.env.GMAIL_FROM || (process.env.GMAIL_USER || "your.gmail@example.com"),
+      from: `"Project Management System" <${GMAIL_USER}>`,
       to: toEmail,
-      subject: "Your OTP Code for Password Reset",
-      text: `Hello ${username},\n\nYour OTP code is: ${otp}. It will expire in 10 minutes.\n\nIf you did not request this, please ignore this email.`,
-      html: `<p>Hello <b>${username}</b>,</p><p>Your OTP code is: <b style="font-size:18px;">${otp}</b></p><p>It will expire in 10 minutes.</p><p>If you did not request this, please ignore this email.</p>`,
+      replyTo: GMAIL_USER,
+      subject: "Your New Password - Project Management System",
+      text: `Hello ${username},\n\nYour password has been reset. Your new password is: ${password}\n\nPlease use this password to log in. For security, we recommend changing your password after logging in.\n\nIf you did not request this, please contact support immediately.`,
+      html: `<p>Hello <b>${username}</b>,</p><p>Your password has been reset. Your new password is: <b style="font-size:18px; color:#2563eb;">${password}</b></p><p>Please use this password to log in. For security, we recommend changing your password after logging in.</p><p>If you did not request this, please contact support immediately.</p>`,
     });
-    console.log("OTP email sent:", info.messageId);
+    console.log("Password reset email sent successfully:", info.messageId);
+    console.log("Email response:", JSON.stringify(info, null, 2));
     return true;
   } catch (e) {
-    console.error("Failed to send OTP email:", e.message);
+    console.error("Failed to send password email - Error details:", {
+      message: e.message,
+      code: e.code,
+      response: e.response,
+      stack: e.stack
+    });
     return false;
+  }
+}
+
+// Send task reminder email
+async function sendTaskReminderEmail(toEmail, username, taskName, projectName, dueDate, isOverdue = false) {
+  try {
+    const subject = isOverdue 
+      ? `⚠️ Task Overdue: ${taskName} - Project Management System`
+      : `📋 Task Reminder: ${taskName} Due Tomorrow - Project Management System`;
+    
+    const dueDateStr = new Date(dueDate).toLocaleDateString('en-US', { 
+      year: 'numeric', 
+      month: 'long', 
+      day: 'numeric' 
+    });
+    
+    const textContent = isOverdue
+      ? `Hello ${username},\n\nThis is a reminder that your task "${taskName}" in project "${projectName}" is now OVERDUE.\n\nDue Date: ${dueDateStr}\n\nPlease complete this task as soon as possible.\n\nIf you have any questions, please contact your project manager.\n\nBest regards,\nProject Management System`
+      : `Hello ${username},\n\nThis is a reminder that your task "${taskName}" in project "${projectName}" is due TOMORROW.\n\nDue Date: ${dueDateStr}\n\nPlease ensure you complete this task on time.\n\nIf you have any questions, please contact your project manager.\n\nBest regards,\nProject Management System`;
+    
+    const htmlContent = isOverdue
+      ? `<div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+          <h2 style="color: #dc2626;">⚠️ Task Overdue Reminder</h2>
+          <p>Hello <b>${username}</b>,</p>
+          <p>This is a reminder that your task <b>"${taskName}"</b> in project <b>"${projectName}"</b> is now <span style="color: #dc2626; font-weight: bold;">OVERDUE</span>.</p>
+          <div style="background-color: #fef2f2; border-left: 4px solid #dc2626; padding: 12px; margin: 20px 0;">
+            <p style="margin: 0;"><strong>Due Date:</strong> ${dueDateStr}</p>
+          </div>
+          <p>Please complete this task as soon as possible.</p>
+          <p>If you have any questions, please contact your project manager.</p>
+          <p style="margin-top: 30px;">Best regards,<br>Project Management System</p>
+        </div>`
+      : `<div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+          <h2 style="color: #2563eb;">📋 Task Reminder</h2>
+          <p>Hello <b>${username}</b>,</p>
+          <p>This is a reminder that your task <b>"${taskName}"</b> in project <b>"${projectName}"</b> is due <span style="color: #2563eb; font-weight: bold;">TOMORROW</span>.</p>
+          <div style="background-color: #eff6ff; border-left: 4px solid #2563eb; padding: 12px; margin: 20px 0;">
+            <p style="margin: 0;"><strong>Due Date:</strong> ${dueDateStr}</p>
+          </div>
+          <p>Please ensure you complete this task on time.</p>
+          <p>If you have any questions, please contact your project manager.</p>
+          <p style="margin-top: 30px;">Best regards,<br>Project Management System</p>
+        </div>`;
+    
+    const info = await transporter.sendMail({
+      from: `"Project Management System" <${GMAIL_USER}>`,
+      to: toEmail,
+      replyTo: GMAIL_USER,
+      subject: subject,
+      text: textContent,
+      html: htmlContent,
+    });
+    console.log(`Task reminder email sent successfully to ${toEmail}:`, info.messageId);
+    return true;
+  } catch (e) {
+    console.error(`Failed to send task reminder email to ${toEmail} - Error details:`, {
+      message: e.message,
+      code: e.code,
+      response: e.response,
+    });
+    return false;
+  }
+}
+
+// Check and send reminders for tasks due in 1 day
+async function checkAndSendBeforeDueReminders() {
+  try {
+    console.log("Checking for tasks due in 1 day...");
+    
+    // Get tasks due tomorrow (status must not be completed)
+    const tomorrow = new Date();
+    tomorrow.setDate(tomorrow.getDate() + 1);
+    const tomorrowStr = tomorrow.toISOString().split('T')[0];
+    
+    const query = `
+      SELECT 
+        t.id,
+        t.name,
+        t.due_date,
+        t.status,
+        t.assignee_id,
+        u.username,
+        u.email,
+        p.name as project_name
+      FROM tasks t
+      INNER JOIN users u ON t.assignee_id = u.id
+      LEFT JOIN projects p ON t.project_id = p.id
+      WHERE DATE(t.due_date) = ?
+        AND t.status NOT IN ('completed')
+        AND t.due_date IS NOT NULL
+        AND u.email IS NOT NULL
+        AND u.email != ''
+        AND NOT EXISTS (
+          SELECT 1 FROM task_reminders tr
+          WHERE tr.task_id = t.id AND tr.reminder_type = 'before_due'
+        )
+    `;
+    
+    pool.execute(query, [tomorrowStr], async (err, results) => {
+      if (err) {
+        console.error("Error checking tasks due in 1 day:", err);
+        return;
+      }
+      
+      if (!results || results.length === 0) {
+        console.log("No tasks found due in 1 day that need reminders.");
+        return;
+      }
+      
+      console.log(`Found ${results.length} task(s) due in 1 day. Sending reminders...`);
+      
+      for (const task of results) {
+        const emailSent = await sendTaskReminderEmail(
+          task.email,
+          task.username,
+          task.name,
+          task.project_name || 'Unassigned Project',
+          task.due_date,
+          false
+        );
+        
+        if (emailSent) {
+          // Record the reminder in the database
+          const insertQuery = `
+            INSERT INTO task_reminders (task_id, reminder_type)
+            VALUES (?, 'before_due')
+            ON DUPLICATE KEY UPDATE sent_at = CURRENT_TIMESTAMP
+          `;
+          pool.execute(insertQuery, [task.id], (insertErr) => {
+            if (insertErr) {
+              console.error(`Failed to record reminder for task ${task.id}:`, insertErr);
+            } else {
+              console.log(`Reminder recorded for task ${task.id} (before_due)`);
+            }
+          });
+        }
+      }
+      
+      console.log(`Completed sending reminders for tasks due in 1 day.`);
+    });
+  } catch (error) {
+    console.error("Error in checkAndSendBeforeDueReminders:", error);
+  }
+}
+
+// Check and send reminders for overdue tasks
+async function checkAndSendOverdueReminders() {
+  try {
+    console.log("Checking for overdue tasks...");
+    
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const todayStr = today.toISOString().split('T')[0];
+    
+    // Get overdue tasks (status must not be completed, due_date < today)
+    const query = `
+      SELECT 
+        t.id,
+        t.name,
+        t.due_date,
+        t.status,
+        t.assignee_id,
+        u.username,
+        u.email,
+        p.name as project_name
+      FROM tasks t
+      INNER JOIN users u ON t.assignee_id = u.id
+      LEFT JOIN projects p ON t.project_id = p.id
+      WHERE DATE(t.due_date) < ?
+        AND t.status NOT IN ('completed')
+        AND t.due_date IS NOT NULL
+        AND u.email IS NOT NULL
+        AND u.email != ''
+        AND NOT EXISTS (
+          SELECT 1 FROM task_reminders tr
+          WHERE tr.task_id = t.id AND tr.reminder_type = 'overdue'
+        )
+    `;
+    
+    pool.execute(query, [todayStr], async (err, results) => {
+      if (err) {
+        console.error("Error checking overdue tasks:", err);
+        return;
+      }
+      
+      if (!results || results.length === 0) {
+        console.log("No overdue tasks found that need reminders.");
+        return;
+      }
+      
+      console.log(`Found ${results.length} overdue task(s). Sending reminders...`);
+      
+      for (const task of results) {
+        const emailSent = await sendTaskReminderEmail(
+          task.email,
+          task.username,
+          task.name,
+          task.project_name || 'Unassigned Project',
+          task.due_date,
+          true
+        );
+        
+        if (emailSent) {
+          // Record the reminder in the database
+          const insertQuery = `
+            INSERT INTO task_reminders (task_id, reminder_type)
+            VALUES (?, 'overdue')
+            ON DUPLICATE KEY UPDATE sent_at = CURRENT_TIMESTAMP
+          `;
+          pool.execute(insertQuery, [task.id], (insertErr) => {
+            if (insertErr) {
+              console.error(`Failed to record overdue reminder for task ${task.id}:`, insertErr);
+            } else {
+              console.log(`Overdue reminder recorded for task ${task.id}`);
+            }
+          });
+        }
+      }
+      
+      console.log(`Completed sending reminders for overdue tasks.`);
+    });
+  } catch (error) {
+    console.error("Error in checkAndSendOverdueReminders:", error);
   }
 }
 
@@ -280,7 +534,7 @@ app.post("/api/auth/login", (req, res) => {
     const { email, username, password } = req.body || {};
     const identifier = email || username;
     if (!identifier || !password) {
-      return res.status(400).json({ message: "Email and password are required" });
+      return res.status(400).json({ message: "Email/Username and password are required" });
     }
 
     const query =
@@ -305,51 +559,61 @@ app.post("/api/auth/login", (req, res) => {
   }
 });
 
-// Start password reset - generate OTP and email it to user's registered email
+// Password reset - generate random password, update in DB, and email it to user
 app.post("/api/auth/forgot/start", (req, res) => {
-  const { username } = req.body || {};
+  const { username, email } = req.body || {};
+  const identifier = username || email;
 
-  if (!username) {
-    return res.status(400).json({ message: "Username is required" });
+  console.log(`Password reset requested for identifier: ${identifier}`);
+
+  if (!identifier) {
+    return res.status(400).json({ message: "Email/Username is required" });
   }
 
-  const findUserQuery = "SELECT id, username, email FROM users WHERE username = ?";
-  pool.execute(findUserQuery, [username], async (err, rows) => {
+  // Find user by email or username
+  const findUserQuery = "SELECT id, username, email FROM users WHERE email = ? OR username = ?";
+  pool.execute(findUserQuery, [identifier, identifier], async (err, rows) => {
     if (err) {
       console.error("Forgot start - user lookup error:", err);
       return res.status(500).json({ message: "Database error" });
     }
     if (!rows || rows.length === 0) {
+      console.log(`User not found for identifier: ${identifier}`);
       return res.status(404).json({ message: "User not found" });
     }
 
     const user = rows[0];
+    console.log(`User found: ${user.username} (ID: ${user.id}), Email: ${user.email}`);
+    
     if (!user.email) {
+      console.error(`User ${user.username} (ID: ${user.id}) has no email address`);
       return res.status(400).json({ message: "User email not available" });
     }
 
-    const otp = Math.floor(100000 + Math.random() * 900000).toString();
-    const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
+    // Generate random password
+    const newPassword = generateRandomPassword();
+    console.log(`Generated new password for user ${user.username}`);
 
-    const insertReset =
-      "INSERT INTO password_resets (user_id, otp, expires_at, used) VALUES (?, ?, ?, 0)";
-    pool.execute(
-      insertReset,
-      [user.id, otp, new Date(expiresAt)],
-      async (insErr) => {
-        if (insErr) {
-          console.error("Forgot start - insert reset error:", insErr);
-          return res.status(500).json({ message: "Failed to create reset request" });
-        }
-
-        const sent = await sendOtpEmail(user.email, user.username, otp);
-        if (!sent) {
-          return res.status(500).json({ message: "Failed to send OTP email" });
-        }
-
-        return res.json({ message: "OTP sent to registered email" });
+    // Update password in database
+    const updatePasswordQuery = "UPDATE users SET password = ? WHERE id = ?";
+    pool.execute(updatePasswordQuery, [newPassword, user.id], async (updErr) => {
+      if (updErr) {
+        console.error("Forgot start - password update error:", updErr);
+        return res.status(500).json({ message: "Failed to reset password" });
       }
-    );
+
+      console.log(`Password updated in database for user ${user.username}`);
+
+      // Send password via email
+      const sent = await sendPasswordEmail(user.email, user.username, newPassword);
+      if (!sent) {
+        console.error(`Failed to send password email to ${user.email}`);
+        return res.status(500).json({ message: "Failed to send password email. Please contact support." });
+      }
+
+      console.log(`Password reset completed successfully for user ${user.username}`);
+      return res.json({ message: "New password sent to registered email" });
+    });
   });
 });
 
@@ -488,9 +752,30 @@ app.post("/api/auth/forgot/reset", (req, res) => {
  *               $ref: '#/components/schemas/Error'
  */
 app.get("/api/users", (req, res) => {
-  const query = "SELECT * FROM users ORDER BY username";
+  const { userId, userRole } = req.query;
 
-  pool.execute(query, (err, results) => {
+  let query;
+  let params = [];
+
+  // If userId and userRole are provided and user is manager/team_lead, filter by project assignments
+  // Only show users who are team members in projects assigned to this manager/team lead
+  if (userId && userRole && (userRole === 'manager' || userRole === 'team_lead')) {
+    query = `
+      SELECT DISTINCT u.*
+      FROM users u
+      INNER JOIN project_team_members ptm ON u.id = ptm.user_id
+      INNER JOIN project_assignments pa ON ptm.project_id = pa.project_id
+      WHERE pa.assigned_to_user_id = ?
+      ORDER BY u.username
+    `;
+    params = [userId];
+  } else {
+    // Super admin: show all users
+    query = "SELECT * FROM users ORDER BY username";
+    params = [];
+  }
+
+  pool.execute(query, params, (err, results) => {
     if (err) {
       console.error("Users fetch error:", err);
       return res.status(500).json({ message: "Database error" });
@@ -884,13 +1169,38 @@ app.post("/api/team", (req, res) => {
  *               $ref: '#/components/schemas/Error'
  */
 app.get("/api/projects", (req, res) => {
-  const query = "SELECT * FROM projects ORDER BY name";
+  const { userId, userRole } = req.query;
 
-  pool.execute(query, (err, results) => {
+  console.log("📋 GET /api/projects - Query params:", { userId, userRole });
+
+  let query;
+  let params = [];
+
+  // If userId and userRole are provided and user is manager/team_lead, filter by assignments
+  // Super admin and employees see all projects (or filtered by team membership)
+  if (userId && userRole && (userRole === 'manager' || userRole === 'team_lead')) {
+    console.log(`🔍 Filtering projects for ${userRole} (userId: ${userId})`);
+    query = `
+      SELECT DISTINCT p.*
+      FROM projects p
+      INNER JOIN project_assignments pa ON p.id = pa.project_id
+      WHERE pa.assigned_to_user_id = ?
+      ORDER BY p.name
+    `;
+    params = [userId];
+  } else {
+    console.log("👑 Showing all projects (super admin or no filter params)");
+    // Super admin or employee: show all projects
+    query = "SELECT * FROM projects ORDER BY name";
+    params = [];
+  }
+
+  pool.execute(query, params, (err, results) => {
     if (err) {
       console.error("Projects fetch error:", err);
       return res.status(500).json({ message: "Database error" });
     }
+    console.log(`✅ Projects query returned ${results?.length || 0} projects`);
     // Normalize status values for clients
     const normalized = (results || []).map((row) => {
       const raw = (row.status || '').toLowerCase();
@@ -1164,6 +1474,183 @@ app.delete("/api/projects/:id", (req, res) => {
   });
 });
 
+// ==================== PROJECT ASSIGNMENTS API ====================
+
+// Get all project assignments (for super admin)
+app.get("/api/project-assignments", (req, res) => {
+  const query = `
+    SELECT 
+      pa.id,
+      pa.project_id,
+      pa.assigned_to_user_id,
+      pa.assigned_by_user_id,
+      pa.assigned_at,
+      p.name as project_name,
+      p.status as project_status,
+      u_assigned.username as assigned_to_username,
+      u_assigned.email as assigned_to_email,
+      u_assigned.role as assigned_to_role,
+      u_by.username as assigned_by_username
+    FROM project_assignments pa
+    JOIN projects p ON pa.project_id = p.id
+    JOIN users u_assigned ON pa.assigned_to_user_id = u_assigned.id
+    LEFT JOIN users u_by ON pa.assigned_by_user_id = u_by.id
+    ORDER BY p.name, u_assigned.username
+  `;
+
+  pool.execute(query, (err, results) => {
+    if (err) {
+      console.error("Project assignments fetch error:", err);
+      return res.status(500).json({ message: "Database error" });
+    }
+    res.json(results);
+  });
+});
+
+// Get projects assigned to a specific user
+app.get("/api/project-assignments/user/:userId", (req, res) => {
+  const { userId } = req.params;
+
+  const query = `
+    SELECT 
+      p.*,
+      pa.assigned_at,
+      pa.assigned_by_user_id
+    FROM project_assignments pa
+    JOIN projects p ON pa.project_id = p.id
+    WHERE pa.assigned_to_user_id = ?
+    ORDER BY p.name
+  `;
+
+  pool.execute(query, [userId], (err, results) => {
+    if (err) {
+      console.error("User assigned projects fetch error:", err);
+      return res.status(500).json({ message: "Database error" });
+    }
+    // Normalize status values
+    const normalized = (results || []).map((row) => {
+      const raw = (row.status || '').toLowerCase();
+      let status = raw;
+      if (raw === 'on_hold' || raw === 'cancelled') status = 'inactive';
+      if (raw === 'planning') status = 'active';
+      return { ...row, status };
+    });
+    res.json(normalized);
+  });
+});
+
+// Get available managers and team leads for assignment
+app.get("/api/project-assignments/managers-teamleads", (req, res) => {
+  const query = `
+    SELECT 
+      id,
+      username,
+      email,
+      role,
+      available_hours_per_week
+    FROM users
+    WHERE role IN ('manager', 'team_lead')
+    ORDER BY role, username
+  `;
+
+  pool.execute(query, (err, results) => {
+    if (err) {
+      console.error("Managers/Team leads fetch error:", err);
+      return res.status(500).json({ message: "Database error" });
+    }
+    res.json(results);
+  });
+});
+
+// Assign a project to a manager/team lead
+app.post("/api/project-assignments", (req, res) => {
+  const { project_id, assigned_to_user_id, assigned_by_user_id } = req.body;
+
+  if (!project_id || !assigned_to_user_id) {
+    return res.status(400).json({ message: "project_id and assigned_to_user_id are required" });
+  }
+
+  // First verify the user is a manager or team lead
+  const checkUserQuery = "SELECT role FROM users WHERE id = ?";
+  pool.execute(checkUserQuery, [assigned_to_user_id], (err, rows) => {
+    if (err) {
+      console.error("User check error:", err);
+      return res.status(500).json({ message: "Database error" });
+    }
+    if (!rows || rows.length === 0) {
+      return res.status(404).json({ message: "User not found" });
+    }
+    const userRole = rows[0].role;
+    if (userRole !== 'manager' && userRole !== 'team_lead') {
+      return res.status(400).json({ message: "Can only assign projects to managers or team leads" });
+    }
+
+    // Check if assignment already exists
+    const checkAssignmentQuery = "SELECT id FROM project_assignments WHERE project_id = ? AND assigned_to_user_id = ?";
+    pool.execute(checkAssignmentQuery, [project_id, assigned_to_user_id], (checkErr, checkRows) => {
+      if (checkErr) {
+        console.error("Assignment check error:", checkErr);
+        return res.status(500).json({ message: "Database error" });
+      }
+      if (checkRows && checkRows.length > 0) {
+        return res.status(400).json({ message: "Project is already assigned to this user" });
+      }
+
+      // Insert assignment
+      const insertQuery = `
+        INSERT INTO project_assignments (project_id, assigned_to_user_id, assigned_by_user_id)
+        VALUES (?, ?, ?)
+      `;
+      pool.execute(insertQuery, [project_id, assigned_to_user_id, assigned_by_user_id || null], (insertErr, insertResult) => {
+        if (insertErr) {
+          console.error("Assignment insert error:", insertErr);
+          return res.status(500).json({ message: "Failed to assign project" });
+        }
+        res.json({
+          id: insertResult.insertId,
+          message: "Project assigned successfully",
+          project_id,
+          assigned_to_user_id,
+        });
+      });
+    });
+  });
+});
+
+// Unassign a project from a manager/team lead
+app.delete("/api/project-assignments/:id", (req, res) => {
+  const { id } = req.params;
+
+  const deleteQuery = "DELETE FROM project_assignments WHERE id = ?";
+  pool.execute(deleteQuery, [id], (err, result) => {
+    if (err) {
+      console.error("Unassign error:", err);
+      return res.status(500).json({ message: "Database error" });
+    }
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ message: "Assignment not found" });
+    }
+    res.json({ message: "Project unassigned successfully" });
+  });
+});
+
+// Unassign by project and user (alternative endpoint)
+app.delete("/api/project-assignments/project/:projectId/user/:userId", (req, res) => {
+  const { projectId, userId } = req.params;
+
+  const deleteQuery = "DELETE FROM project_assignments WHERE project_id = ? AND assigned_to_user_id = ?";
+  pool.execute(deleteQuery, [projectId, userId], (err, result) => {
+    if (err) {
+      console.error("Unassign error:", err);
+      return res.status(500).json({ message: "Database error" });
+    }
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ message: "Assignment not found" });
+    }
+    res.json({ message: "Project unassigned successfully" });
+  });
+});
+
 // Get projects assigned to a specific user
 app.get("/api/users/:userId/projects", (req, res) => {
   const { userId } = req.params;
@@ -1278,8 +1765,25 @@ app.get("/api/users/:userId/projects/:projectId/tasks", (req, res) => {
 // Get team members for a specific project
 app.get("/api/projects/:id/team", (req, res) => {
   const { id } = req.params;
+  const { userId, userRole } = req.query;
 
-  const query = `
+  // If user is manager/team_lead, verify they have access to this project
+  if (userId && userRole && (userRole === 'manager' || userRole === 'team_lead')) {
+    const checkAccessQuery = `
+      SELECT id FROM project_assignments 
+      WHERE project_id = ? AND assigned_to_user_id = ?
+    `;
+    pool.execute(checkAccessQuery, [id, userId], (checkErr, checkRows) => {
+      if (checkErr) {
+        console.error("Access check error:", checkErr);
+        return res.status(500).json({ message: "Database error" });
+      }
+      if (!checkRows || checkRows.length === 0) {
+        return res.status(403).json({ message: "Access denied: You don't have access to this project" });
+      }
+
+      // User has access, proceed with the query
+      const query = `
         SELECT 
             ptm.*,
             u.username as team_member_name,
@@ -1290,15 +1794,37 @@ app.get("/api/projects/:id/team", (req, res) => {
         JOIN users u ON ptm.user_id = u.id
         WHERE ptm.project_id = ?
         ORDER BY u.username
+      `;
+      pool.execute(query, [id], (err, results) => {
+        if (err) {
+          console.error("Project team fetch error:", err);
+          return res.status(500).json({ message: "Database error" });
+        }
+        res.json(results);
+      });
+    });
+  } else {
+    // Super admin or employee - no access check needed
+    const query = `
+      SELECT 
+          ptm.*,
+          u.username as team_member_name,
+          u.role as team_member_role,
+          u.username,
+          u.email
+      FROM project_team_members ptm
+      JOIN users u ON ptm.user_id = u.id
+      WHERE ptm.project_id = ?
+      ORDER BY u.username
     `;
-
-  pool.execute(query, [id], (err, results) => {
-    if (err) {
-      console.error("Project team fetch error:", err);
-      return res.status(500).json({ message: "Database error" });
-    }
-    res.json(results);
-  });
+    pool.execute(query, [id], (err, results) => {
+      if (err) {
+        console.error("Project team fetch error:", err);
+        return res.status(500).json({ message: "Database error" });
+      }
+      res.json(results);
+    });
+  }
 });
 
 // Add team member to project
@@ -1416,8 +1942,25 @@ app.put("/api/projects/:projectId/team/:userId", (req, res) => {
 // Get available users (not assigned to this project as team members)
 app.get("/api/projects/:id/available-team", (req, res) => {
   const { id } = req.params;
+  const { userId, userRole } = req.query;
 
-  const query = `
+  // If user is manager/team_lead, verify they have access to this project
+  if (userId && userRole && (userRole === 'manager' || userRole === 'team_lead')) {
+    const checkAccessQuery = `
+      SELECT id FROM project_assignments 
+      WHERE project_id = ? AND assigned_to_user_id = ?
+    `;
+    pool.execute(checkAccessQuery, [id, userId], (checkErr, checkRows) => {
+      if (checkErr) {
+        console.error("Access check error:", checkErr);
+        return res.status(500).json({ message: "Database error" });
+      }
+      if (!checkRows || checkRows.length === 0) {
+        return res.status(403).json({ message: "Access denied: You don't have access to this project" });
+      }
+
+      // User has access, proceed with the query
+      const query = `
         SELECT 
             u.id as user_id,
             u.username,
@@ -1431,15 +1974,40 @@ app.get("/api/projects/:id/available-team", (req, res) => {
             WHERE ptm.project_id = ?
         )
         ORDER BY u.username
+      `;
+      pool.execute(query, [id], (err, results) => {
+        if (err) {
+          console.error("Available team fetch error:", err);
+          return res.status(500).json({ message: "Database error" });
+        }
+        res.json(results);
+      });
+    });
+  } else {
+    // Super admin or employee - no access check needed
+    const query = `
+      SELECT 
+          u.id as user_id,
+          u.username,
+          u.email,
+          u.role,
+          u.available_hours_per_week
+      FROM users u
+      WHERE u.id NOT IN (
+          SELECT user_id 
+          FROM project_team_members ptm
+          WHERE ptm.project_id = ?
+      )
+      ORDER BY u.username
     `;
-
-  pool.execute(query, [id], (err, results) => {
-    if (err) {
-      console.error("Available team fetch error:", err);
-      return res.status(500).json({ message: "Database error" });
-    }
-    res.json(results);
-  });
+    pool.execute(query, [id], (err, results) => {
+      if (err) {
+        console.error("Available team fetch error:", err);
+        return res.status(500).json({ message: "Database error" });
+      }
+      res.json(results);
+    });
+  }
 });
 
 // Task Routes - Get all tasks
@@ -1467,18 +2035,32 @@ app.get("/api/projects/:id/available-team", (req, res) => {
  *               $ref: '#/components/schemas/Error'
  */
 app.get("/api/tasks", (req, res) => {
-  const query = `
-        SELECT 
-            t.*,
-            u.username as assignee_name,
-            p.name as project_name
-        FROM tasks t
-        LEFT JOIN users u ON t.assignee_id = u.id
-        LEFT JOIN projects p ON t.project_id = p.id
-        ORDER BY t.created_at DESC
-    `;
+  const { userId, userRole } = req.query;
 
-  pool.execute(query, (err, results) => {
+  let query;
+  let params = [];
+  let joinClause = "";
+
+  // If user is manager/team_lead, filter tasks by their assigned projects
+  if (userId && userRole && (userRole === 'manager' || userRole === 'team_lead')) {
+    joinClause = "INNER JOIN project_assignments pa ON t.project_id = pa.project_id";
+    params.push(userId);
+  }
+
+  query = `
+    SELECT 
+        t.*,
+        u.username as assignee_name,
+        p.name as project_name
+    FROM tasks t
+    LEFT JOIN users u ON t.assignee_id = u.id
+    LEFT JOIN projects p ON t.project_id = p.id
+    ${joinClause}
+    ${params.length > 0 ? 'WHERE pa.assigned_to_user_id = ?' : ''}
+    ORDER BY t.created_at DESC
+  `;
+
+  pool.execute(query, params, (err, results) => {
     if (err) {
       console.error("Tasks fetch error:", err);
       return res.status(500).json({ message: "Database error" });
@@ -2312,26 +2894,56 @@ app.get("/api/metrics", (req, res) => {
 
 app.get("/api/dashboard/data", (req, res) => {
   try {
-    const { projectId, employeeId, startDate, endDate } = req.query;
+    const { projectId, employeeId, startDate, endDate, userId, userRole } = req.query;
 
     console.log("Dashboard data request:", {
       projectId,
       employeeId,
       startDate,
       endDate,
+      userId,
+      userRole,
     });
 
     let whereConditions = [];
     let queryParams = [];
+    let joinClause = "";
 
-    if (projectId && projectId !== "all") {
-      whereConditions.push("t.project_id = ?");
-      queryParams.push(projectId);
+    // If user is manager/team_lead, filter tasks by their assigned projects
+    if (userId && userRole && (userRole === 'manager' || userRole === 'team_lead')) {
+      joinClause = "INNER JOIN project_assignments pa ON t.project_id = pa.project_id";
+      whereConditions.push("pa.assigned_to_user_id = ?");
+      queryParams.push(userId);
     }
 
+    // Handle multiple projectIds (comma-separated string)
+    if (projectId && projectId !== "all") {
+      const projectIds = String(projectId).split(',').map(id => id.trim()).filter(id => id);
+      if (projectIds.length > 0) {
+        if (projectIds.length === 1) {
+          whereConditions.push("t.project_id = ?");
+          queryParams.push(projectIds[0]);
+        } else {
+          const placeholders = projectIds.map(() => '?').join(',');
+          whereConditions.push(`t.project_id IN (${placeholders})`);
+          queryParams.push(...projectIds);
+        }
+      }
+    }
+
+    // Handle multiple employeeIds (comma-separated string)
     if (employeeId && employeeId !== "all") {
-      whereConditions.push("t.assignee_id = ?");
-      queryParams.push(employeeId);
+      const employeeIds = String(employeeId).split(',').map(id => id.trim()).filter(id => id);
+      if (employeeIds.length > 0) {
+        if (employeeIds.length === 1) {
+          whereConditions.push("t.assignee_id = ?");
+          queryParams.push(employeeIds[0]);
+        } else {
+          const placeholders = employeeIds.map(() => '?').join(',');
+          whereConditions.push(`t.assignee_id IN (${placeholders})`);
+          queryParams.push(...employeeIds);
+        }
+      }
     }
 
     if (startDate) {
@@ -2365,6 +2977,7 @@ app.get("/api/dashboard/data", (req, res) => {
           MAX(u.available_hours_per_week) as available_hours
         FROM tasks t
         JOIN users u ON t.assignee_id = u.id
+        ${joinClause}
         ${whereClause}
         GROUP BY DATE_FORMAT(t.due_date, '%Y-W%u'), t.assignee_id
       ) as employee_utilization
@@ -2396,6 +3009,7 @@ app.get("/api/dashboard/data", (req, res) => {
         END as productivity_percentage
       FROM tasks t
       JOIN users u ON t.assignee_id = u.id
+      ${joinClause}
       ${whereClause}
       GROUP BY DATE_FORMAT(t.due_date, '%Y-W%u')
       ORDER BY week ASC
@@ -2409,14 +3023,33 @@ app.get("/api/dashboard/data", (req, res) => {
     let userFilterConditions = [];
     let availabilityUserParams = [];
     
+    // Handle multiple employeeIds (comma-separated string)
     if (employeeId && employeeId !== "all") {
-      // Filter by specific employee
-      userFilterConditions.push("u.id = ?");
-      availabilityUserParams.push(employeeId);
-    } else if (projectId && projectId !== "all") {
-      // Filter by employees assigned to specific project via project_team_members
-      userFilterConditions.push("u.id IN (SELECT user_id FROM project_team_members WHERE project_id = ?)");
-      availabilityUserParams.push(projectId);
+      const employeeIds = String(employeeId).split(',').map(id => id.trim()).filter(id => id);
+      if (employeeIds.length > 0) {
+        if (employeeIds.length === 1) {
+          userFilterConditions.push("u.id = ?");
+          availabilityUserParams.push(employeeIds[0]);
+        } else {
+          const placeholders = employeeIds.map(() => '?').join(',');
+          userFilterConditions.push(`u.id IN (${placeholders})`);
+          availabilityUserParams.push(...employeeIds);
+        }
+      }
+    } 
+    // Handle multiple projectIds (comma-separated string) - only if no employee filter
+    else if (projectId && projectId !== "all") {
+      const projectIds = String(projectId).split(',').map(id => id.trim()).filter(id => id);
+      if (projectIds.length > 0) {
+        if (projectIds.length === 1) {
+          userFilterConditions.push("u.id IN (SELECT user_id FROM project_team_members WHERE project_id = ?)");
+          availabilityUserParams.push(projectIds[0]);
+        } else {
+          const placeholders = projectIds.map(() => '?').join(',');
+          userFilterConditions.push(`u.id IN (SELECT user_id FROM project_team_members WHERE project_id IN (${placeholders}))`);
+          availabilityUserParams.push(...projectIds);
+        }
+      }
     }
     // If no filters, include all users
     
@@ -2432,19 +3065,54 @@ app.get("/api/dashboard/data", (req, res) => {
     let totalAvailableQuery = "";
     let totalAvailableParams = [];
     
+    // Handle multiple employeeIds
     if (employeeId && employeeId !== "all") {
-      // Single employee
-      totalAvailableQuery = "SELECT COALESCE(SUM(available_hours_per_week), 0) as total FROM users WHERE id = ?";
-      totalAvailableParams = [employeeId];
-    } else if (projectId && projectId !== "all") {
-      // Employees assigned to project
+      const employeeIds = String(employeeId).split(',').map(id => id.trim()).filter(id => id);
+      if (employeeIds.length === 1) {
+        // Single employee
+        totalAvailableQuery = "SELECT COALESCE(SUM(available_hours_per_week), 0) as total FROM users WHERE id = ?";
+        totalAvailableParams = [employeeIds[0]];
+      } else {
+        // Multiple employees
+        const placeholders = employeeIds.map(() => '?').join(',');
+        totalAvailableQuery = `SELECT COALESCE(SUM(available_hours_per_week), 0) as total FROM users WHERE id IN (${placeholders})`;
+        totalAvailableParams = employeeIds;
+      }
+    } 
+    // Handle multiple projectIds
+    else if (projectId && projectId !== "all") {
+      const projectIds = String(projectId).split(',').map(id => id.trim()).filter(id => id);
+      if (projectIds.length === 1) {
+        // Single project
+        totalAvailableQuery = `
+          SELECT COALESCE(SUM(u.available_hours_per_week), 0) as total
+          FROM users u
+          INNER JOIN project_team_members ptm ON u.id = ptm.user_id
+          WHERE ptm.project_id = ?
+        `;
+        totalAvailableParams = [projectIds[0]];
+      } else {
+        // Multiple projects
+        const placeholders = projectIds.map(() => '?').join(',');
+        totalAvailableQuery = `
+          SELECT COALESCE(SUM(u.available_hours_per_week), 0) as total
+          FROM users u
+          INNER JOIN project_team_members ptm ON u.id = ptm.user_id
+          WHERE ptm.project_id IN (${placeholders})
+        `;
+        totalAvailableParams = projectIds;
+      }
+    } 
+    // For managers/team leads without project filter, use their assigned projects
+    else if (userId && userRole && (userRole === 'manager' || userRole === 'team_lead')) {
       totalAvailableQuery = `
         SELECT COALESCE(SUM(u.available_hours_per_week), 0) as total
         FROM users u
         INNER JOIN project_team_members ptm ON u.id = ptm.user_id
-        WHERE ptm.project_id = ?
+        INNER JOIN project_assignments pa ON ptm.project_id = pa.project_id
+        WHERE pa.assigned_to_user_id = ?
       `;
-      totalAvailableParams = [projectId];
+      totalAvailableParams = [userId];
     } else {
       // All users
       totalAvailableQuery = "SELECT COALESCE(SUM(available_hours_per_week), 0) as total FROM users";
@@ -2454,26 +3122,18 @@ app.get("/api/dashboard/data", (req, res) => {
     // Simplified approach: Calculate availability per week directly
     // Return negative values for overutilization (when planned > available)
     // Positive values = available hours, Negative values = overutilized hours
+    // Note: Week generation will be handled in the merge step, so we just calculate for existing weeks
     const availabilityQuery = `
       SELECT 
         week,
         COALESCE(?, 0) - COALESCE(SUM(total_planned_hours), 0) as available_hours
       FROM (
-        -- Get weeks from tasks with 0 planned hours
-        SELECT 
-          DATE_FORMAT(t.due_date, '%Y-W%u') as week,
-          0 as total_planned_hours
-        FROM tasks t
-        ${whereClause}
-        GROUP BY DATE_FORMAT(t.due_date, '%Y-W%u')
-        
-        UNION ALL
-        
         -- Get total planned hours from ALL tasks for each week (no status filter - includes completed)
         SELECT 
           DATE_FORMAT(t.due_date, '%Y-W%u') as week,
           SUM(t.planned_hours) as total_planned_hours
         FROM tasks t
+        ${joinClause}
         ${whereClause}
         GROUP BY DATE_FORMAT(t.due_date, '%Y-W%u')
       ) as availability_calc
@@ -2481,11 +3141,8 @@ app.get("/api/dashboard/data", (req, res) => {
       ORDER BY week ASC
     `;
     
-    // Params: total available hours + where clause params for tasks (used twice in UNION ALL)
-    const availabilityParamsBase = [
-      ...queryParams,  // For tasks in first part (weeks list)
-      ...queryParams   // For tasks in second part (planned hours)
-    ];
+    // Params: total available hours + where clause params for tasks
+    const availabilityParamsBase = [...queryParams];
 
     // Execute all queries
     pool.execute(utilizationQuery, queryParams, (err, utilizationRows) => {
@@ -2664,9 +3321,28 @@ app.get("/api/dashboard/data", (req, res) => {
 
 // Get projects for filter dropdown
 app.get("/api/dashboard/projects", (req, res) => {
-  const query = "SELECT id, name, status FROM projects ORDER BY name";
+  const { userId, userRole } = req.query;
 
-  pool.execute(query, (err, results) => {
+  let query;
+  let params = [];
+
+  // If userId and userRole are provided and user is manager/team_lead, filter by assignments
+  if (userId && userRole && (userRole === 'manager' || userRole === 'team_lead')) {
+    query = `
+      SELECT DISTINCT p.id, p.name, p.status
+      FROM projects p
+      INNER JOIN project_assignments pa ON p.id = pa.project_id
+      WHERE pa.assigned_to_user_id = ?
+      ORDER BY p.name
+    `;
+    params = [userId];
+  } else {
+    // Super admin or employee: show all projects
+    query = "SELECT id, name, status FROM projects ORDER BY name";
+    params = [];
+  }
+
+  pool.execute(query, params, (err, results) => {
     if (err) {
       console.error("Projects filter error:", err);
       return res.status(500).json({ error: "Failed to fetch projects" });
@@ -2677,30 +3353,115 @@ app.get("/api/dashboard/projects", (req, res) => {
 
 // Get employees for filter dropdown (optionally filtered by project)
 app.get("/api/dashboard/employees", (req, res) => {
-  const { projectId } = req.query;
+  const { projectId, userId, userRole } = req.query;
 
   let query;
   let params = [];
 
+  // Handle multiple projectIds (comma-separated string)
   if (projectId && projectId !== "all" && projectId !== undefined) {
-    // If projectId is provided, only return employees assigned to that project
-    query = `
-      SELECT DISTINCT 
-        u.id, 
-        u.username, 
-        u.email, 
-        u.role, 
-        u.available_hours_per_week 
-      FROM users u
-      INNER JOIN project_team_members ptm ON u.id = ptm.user_id
-      WHERE ptm.project_id = ?
-      ORDER BY u.username
-    `;
-    params = [projectId];
+    const projectIds = String(projectId).split(',').map(id => id.trim()).filter(id => id);
+    
+    if (projectIds.length > 0) {
+      // If projectId(s) provided, only return employees assigned to those projects
+      // Also check if user has access to these projects (for managers/team leads)
+      if (userId && userRole && (userRole === 'manager' || userRole === 'team_lead')) {
+        // Verify user has access to all projects
+        const placeholders = projectIds.map(() => '?').join(',');
+        const checkAccessQuery = `
+          SELECT DISTINCT project_id FROM project_assignments 
+          WHERE project_id IN (${placeholders}) AND assigned_to_user_id = ?
+        `;
+        pool.execute(checkAccessQuery, [...projectIds, userId], (checkErr, checkRows) => {
+          if (checkErr) {
+            console.error("Access check error:", checkErr);
+            return res.status(500).json({ error: "Database error" });
+          }
+          if (!checkRows || checkRows.length === 0) {
+            return res.json([]); // No access, return empty
+          }
+
+          // User has access, return employees for these projects
+          const employeePlaceholders = projectIds.map(() => '?').join(',');
+          query = `
+            SELECT DISTINCT 
+              u.id, 
+              u.username, 
+              u.email, 
+              u.role, 
+              u.available_hours_per_week 
+            FROM users u
+            INNER JOIN project_team_members ptm ON u.id = ptm.user_id
+            WHERE ptm.project_id IN (${employeePlaceholders})
+            ORDER BY u.username
+          `;
+          params = projectIds;
+          pool.execute(query, params, (err, results) => {
+            if (err) {
+              console.error("Employees filter error:", err);
+              return res.status(500).json({ error: "Failed to fetch employees" });
+            }
+            res.json(results);
+          });
+        });
+        return;
+      } else {
+        // Super admin or employee - no access check
+        if (projectIds.length === 1) {
+          query = `
+            SELECT DISTINCT 
+              u.id, 
+              u.username, 
+              u.email, 
+              u.role, 
+              u.available_hours_per_week 
+            FROM users u
+            INNER JOIN project_team_members ptm ON u.id = ptm.user_id
+            WHERE ptm.project_id = ?
+            ORDER BY u.username
+          `;
+          params = [projectIds[0]];
+        } else {
+          const placeholders = projectIds.map(() => '?').join(',');
+          query = `
+            SELECT DISTINCT 
+              u.id, 
+              u.username, 
+              u.email, 
+              u.role, 
+              u.available_hours_per_week 
+            FROM users u
+            INNER JOIN project_team_members ptm ON u.id = ptm.user_id
+            WHERE ptm.project_id IN (${placeholders})
+            ORDER BY u.username
+          `;
+          params = projectIds;
+        }
+      }
+    }
   } else {
-    // Return all employees if no project filter
-    query =
-      "SELECT id, username, email, role, available_hours_per_week FROM users ORDER BY username";
+    // No project filter - return employees based on user role
+    if (userId && userRole && (userRole === 'manager' || userRole === 'team_lead')) {
+      // For managers/team leads, only show employees from their assigned projects
+      query = `
+        SELECT DISTINCT 
+          u.id, 
+          u.username, 
+          u.email, 
+          u.role, 
+          u.available_hours_per_week 
+        FROM users u
+        INNER JOIN project_team_members ptm ON u.id = ptm.user_id
+        INNER JOIN project_assignments pa ON ptm.project_id = pa.project_id
+        WHERE pa.assigned_to_user_id = ?
+        ORDER BY u.username
+      `;
+      params = [userId];
+    } else {
+      // Super admin or employee - return all employees
+      query = "SELECT id, username, email, role, available_hours_per_week FROM users ORDER BY username";
+      params = [];
+    }
   }
 
   pool.execute(query, params, (err, results) => {
@@ -2714,32 +3475,62 @@ app.get("/api/dashboard/employees", (req, res) => {
 
 // Get task status distribution for pie chart
 app.get("/api/dashboard/task-status", (req, res) => {
-  const { projectId, employeeId, startDate, endDate } = req.query;
+  const { projectId, employeeId, startDate, endDate, userId, userRole } = req.query;
 
-  console.log("Task status request with filters:", { projectId, employeeId, startDate, endDate });
+  console.log("Task status request with filters:", { projectId, employeeId, startDate, endDate, userId, userRole });
 
   // Build dynamic query based on filters - using due_date for consistency
   let whereConditions = [];
   let queryParams = [];
+  let joinClause = "";
 
-  if (projectId && projectId !== "all") {
-    whereConditions.push("project_id = ?");
-    queryParams.push(projectId);
+  // If user is manager/team_lead, filter tasks by their assigned projects
+  if (userId && userRole && (userRole === 'manager' || userRole === 'team_lead')) {
+    joinClause = "INNER JOIN project_assignments pa ON t.project_id = pa.project_id";
+    whereConditions.push("pa.assigned_to_user_id = ?");
+    queryParams.push(userId);
   }
 
+  // Handle multiple projectIds (comma-separated string)
+  if (projectId && projectId !== "all") {
+    const projectIds = String(projectId).split(',').map(id => id.trim()).filter(id => id);
+    if (projectIds.length > 0) {
+      if (projectIds.length === 1) {
+        whereConditions.push("t.project_id = ?");
+        queryParams.push(projectIds[0]);
+      } else {
+        const placeholders = projectIds.map(() => '?').join(',');
+        whereConditions.push(`t.project_id IN (${placeholders})`);
+        queryParams.push(...projectIds);
+      }
+    }
+  }
+
+  // Handle multiple employeeIds (comma-separated string)
   if (employeeId && employeeId !== "all") {
-    whereConditions.push("assignee_id = ?");
-    queryParams.push(employeeId);
+    const employeeIds = String(employeeId).split(',').map(id => id.trim()).filter(id => id);
+    if (employeeIds.length > 0) {
+      if (employeeIds.length === 1) {
+        whereConditions.push("t.assignee_id = ?");
+        queryParams.push(employeeIds[0]);
+      } else {
+        const placeholders = employeeIds.map(() => '?').join(',');
+        whereConditions.push(`t.assignee_id IN (${placeholders})`);
+        queryParams.push(...employeeIds);
+      }
+    }
   }
 
   // Use due_date for consistency with other dashboard queries
+  // Only filter by date if dates are provided, and exclude tasks without due_date if dates are provided
   if (startDate) {
-    whereConditions.push("DATE(due_date) >= ?");
+    whereConditions.push("t.due_date IS NOT NULL");
+    whereConditions.push("DATE(t.due_date) >= ?");
     queryParams.push(startDate);
   }
 
   if (endDate) {
-    whereConditions.push("DATE(due_date) <= ?");
+    whereConditions.push("DATE(t.due_date) <= ?");
     queryParams.push(endDate);
   }
 
@@ -2748,11 +3539,12 @@ app.get("/api/dashboard/task-status", (req, res) => {
 
   const query = `
     SELECT 
-      status,
+      t.status,
       COUNT(*) as count
-    FROM tasks 
+    FROM tasks t
+    ${joinClause}
     ${whereClause}
-    GROUP BY status
+    GROUP BY t.status
   `;
 
   console.log("Executing task status query:", query);
@@ -2847,16 +3639,36 @@ app.get("/api/dashboard/tasks-timeline", (req, res) => {
 
     // Role restriction: employees and team_leads only see own tasks unless employeeId provided
     if (employeeId && employeeId !== "all") {
-      conditions.push("t.assignee_id = ?");
-      params.push(employeeId);
+      // Handle multiple employeeIds (comma-separated string)
+      const employeeIds = String(employeeId).split(',').map(id => id.trim()).filter(id => id);
+      if (employeeIds.length > 0) {
+        if (employeeIds.length === 1) {
+          conditions.push("t.assignee_id = ?");
+          params.push(employeeIds[0]);
+        } else {
+          const placeholders = employeeIds.map(() => '?').join(',');
+          conditions.push(`t.assignee_id IN (${placeholders})`);
+          params.push(...employeeIds);
+        }
+      }
     } else if (role === "employee" || role === "team_lead") {
       conditions.push("t.assignee_id = ?");
       params.push(userId);
     }
 
+    // Handle multiple projectIds (comma-separated string)
     if (projectId && projectId !== "all") {
-      conditions.push("t.project_id = ?");
-      params.push(projectId);
+      const projectIds = String(projectId).split(',').map(id => id.trim()).filter(id => id);
+      if (projectIds.length > 0) {
+        if (projectIds.length === 1) {
+          conditions.push("t.project_id = ?");
+          params.push(projectIds[0]);
+        } else {
+          const placeholders = projectIds.map(() => '?').join(',');
+          conditions.push(`t.project_id IN (${placeholders})`);
+          params.push(...projectIds);
+        }
+      }
     }
 
     const baseWhere = conditions.length
@@ -3231,7 +4043,7 @@ app.post("/api/tasks/debug-workload", async (req, res) => {
     }
 
     // Get employee's available hours per week
-    const [userRows] = await pool.execute(
+    const [userRows] = await pool.promise().execute(
       `
       SELECT available_hours_per_week FROM users WHERE id = ?
     `,
@@ -3256,10 +4068,40 @@ app.post("/api/tasks/debug-workload", async (req, res) => {
   }
 });
 
+// ==================== TASK REMINDER SCHEDULER ====================
+
+// Schedule task reminders to run daily at 9:00 AM
+// Cron format: minute hour day month dayOfWeek
+// '0 9 * * *' means: at 9:00 AM every day
+cron.schedule('0 9 * * *', async () => {
+  console.log('=== Running scheduled task reminders ===');
+  console.log(`Scheduled job started at: ${new Date().toISOString()}`);
+  
+  // Check and send reminders for tasks due in 1 day
+  await checkAndSendBeforeDueReminders();
+  
+  // Check and send reminders for overdue tasks
+  await checkAndSendOverdueReminders();
+  
+  console.log('=== Scheduled task reminders completed ===');
+});
+
+// Manual trigger endpoint for testing (can be removed in production or secured)
+app.post("/api/tasks/trigger-reminders", (req, res) => {
+  console.log('Manual trigger for task reminders requested');
+  checkAndSendBeforeDueReminders();
+  checkAndSendOverdueReminders();
+  res.json({ 
+    message: "Task reminder checks triggered manually",
+    timestamp: new Date().toISOString()
+  });
+});
+
 // Serve static files from the React app build directory
 app.use(express.static(path.join(__dirname, "../frontend/build")));
 
 const PORT = process.env.PORT || 5005;
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
+  console.log('Task reminder scheduler is active. Reminders will be sent daily at 9:00 AM.');
 });

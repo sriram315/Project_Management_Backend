@@ -26,4 +26,4 @@ pool.getConnection((err, connection) => {
     connection.release();
 });
 
-module.exports = pool.promise();
+module.exports = pool; // Export pool for callback-based usage
