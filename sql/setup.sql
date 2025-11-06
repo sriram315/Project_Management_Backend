@@ -22,7 +22,7 @@ CREATE TABLE IF NOT EXISTS team_members (
 CREATE TABLE IF NOT EXISTS projects (
     id INT PRIMARY KEY AUTO_INCREMENT,
     name VARCHAR(100) NOT NULL,
-    status ENUM('active', 'planning', 'completed') DEFAULT 'planning',
+    status ENUM('active', 'inactive', 'completed', 'dropped') DEFAULT 'active',
     team_lead_id INT,
     progress INT DEFAULT 0,
     FOREIGN KEY (team_lead_id) REFERENCES team_members(id)

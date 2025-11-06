@@ -727,6 +727,75 @@ app.post("/api/auth/forgot/reset", (req, res) => {
   });
 });
 
+// Change password with current password verification (user-chosen new password)
+/**
+ * @swagger
+ * /api/auth/change-password:
+ *   post:
+ *     summary: Change password (requires current password)
+ *     tags: [Auth]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [userId, currentPassword, newPassword]
+ *             properties:
+ *               userId:
+ *                 type: integer
+ *               currentPassword:
+ *                 type: string
+ *               newPassword:
+ *                 type: string
+ *     responses:
+ *       200:
+ *         description: Password changed successfully
+ *       400:
+ *         description: Bad request
+ *       401:
+ *         description: Current password incorrect
+ *       500:
+ *         description: Server error
+ */
+app.post("/api/auth/change-password", (req, res) => {
+  const { userId, currentPassword, newPassword } = req.body || {};
+
+  if (!userId || !currentPassword || !newPassword) {
+    return res.status(400).json({ message: "userId, currentPassword and newPassword are required" });
+  }
+
+  // Basic password policy: 8-15 chars, at least 1 upper, 1 lower, 1 special
+  const passwordRegex = /^(?=.*[a-z])(?=.*[A-Z])(?=.*[!@#$%^&*()_+\-={}\[\]|;:'\",.<>\/?`~]).{8,15}$/;
+  if (!passwordRegex.test(newPassword)) {
+    return res.status(400).json({
+      message:
+        "Password must be 8-15 characters, include at least one uppercase, one lowercase, and one special character",
+    });
+  }
+
+  // Verify current password
+  const findUserQuery = "SELECT id FROM users WHERE id = ? AND password = ? LIMIT 1";
+  pool.execute(findUserQuery, [userId, currentPassword], (err, rows) => {
+    if (err) {
+      console.error("Change password - user lookup error:", err);
+      return res.status(500).json({ message: "Database error" });
+    }
+    if (!rows || rows.length === 0) {
+      return res.status(401).json({ message: "Current password is incorrect" });
+    }
+
+    const updatePasswordQuery = "UPDATE users SET password = ? WHERE id = ?";
+    pool.execute(updatePasswordQuery, [newPassword, userId], (updErr) => {
+      if (updErr) {
+        console.error("Change password - update error:", updErr);
+        return res.status(500).json({ message: "Failed to update password" });
+      }
+      return res.json({ message: "Password changed successfully" });
+    });
+  });
+});
+
 // Get all users
 /**
  * @swagger
@@ -759,29 +828,60 @@ app.get("/api/users", (req, res) => {
 
   // If userId and userRole are provided and user is manager/team_lead, filter by project assignments
   // Only show users who are team members in projects assigned to this manager/team lead
+  // If manager has no project assignments, show all users (like super admin)
   if (userId && userRole && (userRole === 'manager' || userRole === 'team_lead')) {
-    query = `
-      SELECT DISTINCT u.*
-      FROM users u
-      INNER JOIN project_team_members ptm ON u.id = ptm.user_id
-      INNER JOIN project_assignments pa ON ptm.project_id = pa.project_id
-      WHERE pa.assigned_to_user_id = ?
-      ORDER BY u.username
+    // First check if manager has any project assignments
+    const checkAssignmentsQuery = `
+      SELECT COUNT(*) as count
+      FROM project_assignments
+      WHERE assigned_to_user_id = ?
     `;
-    params = [userId];
+    
+    pool.execute(checkAssignmentsQuery, [userId], (checkErr, checkRows) => {
+      if (checkErr) {
+        console.error("Check assignments error:", checkErr);
+        return res.status(500).json({ message: "Database error" });
+      }
+      
+      const hasAssignments = checkRows[0]?.count > 0;
+      
+      if (hasAssignments) {
+        // Manager has assignments - show users from assigned projects
+        query = `
+          SELECT DISTINCT u.*
+          FROM users u
+          INNER JOIN project_team_members ptm ON u.id = ptm.user_id
+          INNER JOIN project_assignments pa ON ptm.project_id = pa.project_id
+          WHERE pa.assigned_to_user_id = ?
+          ORDER BY u.username
+        `;
+        params = [userId];
+      } else {
+        // Manager has no assignments - show empty (security: don't show other managers' data)
+        return res.json([]);
+      }
+      
+      pool.execute(query, params, (err, results) => {
+        if (err) {
+          console.error("Users fetch error:", err);
+          return res.status(500).json({ message: "Database error" });
+        }
+        res.json(results);
+      });
+    });
   } else {
     // Super admin: show all users
     query = "SELECT * FROM users ORDER BY username";
     params = [];
+    
+    pool.execute(query, params, (err, results) => {
+      if (err) {
+        console.error("Users fetch error:", err);
+        return res.status(500).json({ message: "Database error" });
+      }
+      res.json(results);
+    });
   }
-
-  pool.execute(query, params, (err, results) => {
-    if (err) {
-      console.error("Users fetch error:", err);
-      return res.status(500).json({ message: "Database error" });
-    }
-    res.json(results);
-  });
 });
 
 // Add new user
@@ -1178,39 +1278,109 @@ app.get("/api/projects", (req, res) => {
 
   // If userId and userRole are provided and user is manager/team_lead, filter by assignments
   // Super admin and employees see all projects (or filtered by team membership)
+  // If manager has no project assignments, show all projects (like super admin)
   if (userId && userRole && (userRole === 'manager' || userRole === 'team_lead')) {
     console.log(`🔍 Filtering projects for ${userRole} (userId: ${userId})`);
+    
+    // First check if manager has any project assignments
+    const checkAssignmentsQuery = `
+      SELECT COUNT(*) as count
+      FROM project_assignments
+      WHERE assigned_to_user_id = ?
+    `;
+    
+    pool.execute(checkAssignmentsQuery, [userId], (checkErr, checkRows) => {
+      if (checkErr) {
+        console.error("Check assignments error:", checkErr);
+        return res.status(500).json({ message: "Database error" });
+      }
+      
+      const hasAssignments = checkRows[0]?.count > 0;
+      
+      if (hasAssignments) {
+        // Manager has assignments - show assigned projects
+        query = `
+          SELECT DISTINCT p.*
+          FROM projects p
+          INNER JOIN project_assignments pa ON p.id = pa.project_id
+          WHERE pa.assigned_to_user_id = ?
+          ORDER BY p.name
+        `;
+        params = [userId];
+      } else {
+        // Manager has no assignments - show empty (security: don't show other managers' data)
+        console.log("🔒 Manager has no assignments - returning empty projects array");
+        return res.json([]);
+      }
+      
+      pool.execute(query, params, (err, results) => {
+        if (err) {
+          console.error("Projects fetch error:", err);
+          return res.status(500).json({ message: "Database error" });
+        }
+        console.log(`✅ Projects query returned ${results?.length || 0} projects`);
+        // Normalize status values for clients
+        const normalized = (results || []).map((row) => {
+          const raw = (row.status || '').toLowerCase();
+          let status = raw;
+          if (raw === 'on_hold' || raw === 'cancelled') status = 'inactive';
+          if (raw === 'planning') status = 'active';
+          return { ...row, status };
+        });
+        res.json(normalized);
+      });
+    });
+  } else if (userId && userRole && userRole === 'employee') {
+    // For employees, show only projects they are assigned to (via project_team_members)
+    console.log(`👤 Filtering projects for employee (userId: ${userId})`);
     query = `
       SELECT DISTINCT p.*
       FROM projects p
-      INNER JOIN project_assignments pa ON p.id = pa.project_id
-      WHERE pa.assigned_to_user_id = ?
+      INNER JOIN project_team_members ptm ON p.id = ptm.project_id
+      WHERE ptm.user_id = ?
       ORDER BY p.name
     `;
     params = [userId];
+    
+    pool.execute(query, params, (err, results) => {
+      if (err) {
+        console.error("Projects fetch error:", err);
+        return res.status(500).json({ message: "Database error" });
+      }
+      console.log(`✅ Projects query returned ${results?.length || 0} projects for employee`);
+      // Normalize status values for clients
+      const normalized = (results || []).map((row) => {
+        const raw = (row.status || '').toLowerCase();
+        let status = raw;
+        if (raw === 'on_hold' || raw === 'cancelled') status = 'inactive';
+        if (raw === 'planning') status = 'active';
+        return { ...row, status };
+      });
+      res.json(normalized);
+    });
   } else {
     console.log("👑 Showing all projects (super admin or no filter params)");
-    // Super admin or employee: show all projects
+    // Super admin: show all projects
     query = "SELECT * FROM projects ORDER BY name";
     params = [];
-  }
-
-  pool.execute(query, params, (err, results) => {
-    if (err) {
-      console.error("Projects fetch error:", err);
-      return res.status(500).json({ message: "Database error" });
-    }
-    console.log(`✅ Projects query returned ${results?.length || 0} projects`);
-    // Normalize status values for clients
-    const normalized = (results || []).map((row) => {
-      const raw = (row.status || '').toLowerCase();
-      let status = raw;
-      if (raw === 'on_hold' || raw === 'cancelled') status = 'inactive';
-      if (raw === 'planning') status = 'active';
-      return { ...row, status };
+    
+    pool.execute(query, params, (err, results) => {
+      if (err) {
+        console.error("Projects fetch error:", err);
+        return res.status(500).json({ message: "Database error" });
+      }
+      console.log(`✅ Projects query returned ${results?.length || 0} projects`);
+      // Normalize status values for clients
+      const normalized = (results || []).map((row) => {
+        const raw = (row.status || '').toLowerCase();
+        let status = raw;
+        if (raw === 'on_hold' || raw === 'cancelled') status = 'inactive';
+        if (raw === 'planning') status = 'active';
+        return { ...row, status };
+      });
+      res.json(normalized);
     });
-    res.json(normalized);
-  });
+  }
 });
 
 // Add new project
@@ -1294,6 +1464,9 @@ app.post("/api/projects", (req, res) => {
   // Validate required fields
   if (!name) {
     return res.status(400).json({ message: "Project name is required" });
+  }
+  if (!start_date) {
+    return res.status(400).json({ message: "Project start date is required" });
   }
 
   const query =
@@ -2042,31 +2215,97 @@ app.get("/api/tasks", (req, res) => {
   let joinClause = "";
 
   // If user is manager/team_lead, filter tasks by their assigned projects
+  // If manager has no project assignments, show all tasks (like super admin)
   if (userId && userRole && (userRole === 'manager' || userRole === 'team_lead')) {
-    joinClause = "INNER JOIN project_assignments pa ON t.project_id = pa.project_id";
-    params.push(userId);
+    // First check if manager has any project assignments
+    const checkAssignmentsQuery = `
+      SELECT COUNT(*) as count
+      FROM project_assignments
+      WHERE assigned_to_user_id = ?
+    `;
+    
+    pool.execute(checkAssignmentsQuery, [userId], (checkErr, checkRows) => {
+      if (checkErr) {
+        console.error("Check assignments error:", checkErr);
+        return res.status(500).json({ message: "Database error" });
+      }
+      
+      const hasAssignments = checkRows[0]?.count > 0;
+      
+      if (hasAssignments) {
+        // Manager has assignments - show tasks from assigned projects
+        joinClause = "INNER JOIN project_assignments pa ON t.project_id = pa.project_id";
+        params.push(userId);
+      } else {
+        // Manager has no assignments - show empty (security: don't show other managers' data)
+        return res.json([]);
+      }
+      
+      query = `
+        SELECT 
+            t.*,
+            u.username as assignee_name,
+            p.name as project_name
+        FROM tasks t
+        LEFT JOIN users u ON t.assignee_id = u.id
+        LEFT JOIN projects p ON t.project_id = p.id
+        ${joinClause}
+        ${params.length > 0 ? 'WHERE pa.assigned_to_user_id = ?' : ''}
+        ORDER BY t.created_at DESC
+      `;
+
+      pool.execute(query, params, (err, results) => {
+        if (err) {
+          console.error("Tasks fetch error:", err);
+          return res.status(500).json({ message: "Database error" });
+        }
+        res.json(results);
+      });
+    });
+  } else if (userId && userRole && userRole === 'employee') {
+    // For employees, show only tasks assigned to them
+    query = `
+      SELECT 
+          t.*,
+          u.username as assignee_name,
+          p.name as project_name
+      FROM tasks t
+      LEFT JOIN users u ON t.assignee_id = u.id
+      LEFT JOIN projects p ON t.project_id = p.id
+      WHERE t.assignee_id = ?
+      ORDER BY t.created_at DESC
+    `;
+    params = [userId];
+
+    pool.execute(query, params, (err, results) => {
+      if (err) {
+        console.error("Tasks fetch error:", err);
+        return res.status(500).json({ message: "Database error" });
+      }
+      res.json(results);
+    });
+  } else {
+    // Super admin: show all tasks
+    query = `
+      SELECT 
+          t.*,
+          u.username as assignee_name,
+          p.name as project_name
+      FROM tasks t
+      LEFT JOIN users u ON t.assignee_id = u.id
+      LEFT JOIN projects p ON t.project_id = p.id
+      ORDER BY t.created_at DESC
+    `;
+    params = [];
+
+    pool.execute(query, params, (err, results) => {
+      if (err) {
+        console.error("Tasks fetch error:", err);
+        return res.status(500).json({ message: "Database error" });
+      }
+      res.json(results);
+    });
   }
-
-  query = `
-    SELECT 
-        t.*,
-        u.username as assignee_name,
-        p.name as project_name
-    FROM tasks t
-    LEFT JOIN users u ON t.assignee_id = u.id
-    LEFT JOIN projects p ON t.project_id = p.id
-    ${joinClause}
-    ${params.length > 0 ? 'WHERE pa.assigned_to_user_id = ?' : ''}
-    ORDER BY t.created_at DESC
-  `;
-
-  pool.execute(query, params, (err, results) => {
-    if (err) {
-      console.error("Tasks fetch error:", err);
-      return res.status(500).json({ message: "Database error" });
-    }
-    res.json(results);
-  });
 });
 
 // Get tasks by project
@@ -2909,61 +3148,69 @@ app.get("/api/dashboard/data", (req, res) => {
     let queryParams = [];
     let joinClause = "";
 
-    // If user is manager/team_lead, filter tasks by their assigned projects
-    if (userId && userRole && (userRole === 'manager' || userRole === 'team_lead')) {
-      joinClause = "INNER JOIN project_assignments pa ON t.project_id = pa.project_id";
-      whereConditions.push("pa.assigned_to_user_id = ?");
-      queryParams.push(userId);
-    }
-
-    // Handle multiple projectIds (comma-separated string)
-    if (projectId && projectId !== "all") {
-      const projectIds = String(projectId).split(',').map(id => id.trim()).filter(id => id);
-      if (projectIds.length > 0) {
-        if (projectIds.length === 1) {
-          whereConditions.push("t.project_id = ?");
-          queryParams.push(projectIds[0]);
-        } else {
-          const placeholders = projectIds.map(() => '?').join(',');
-          whereConditions.push(`t.project_id IN (${placeholders})`);
-          queryParams.push(...projectIds);
+    // Helper function to build and execute dashboard data queries
+    function continueDashboardDataQuery(hasAssignments = false) {
+      // Handle multiple projectIds (comma-separated string)
+      if (projectId && projectId !== "all") {
+        const projectIds = String(projectId).split(',').map(id => id.trim()).filter(id => id);
+        if (projectIds.length > 0) {
+          if (projectIds.length === 1) {
+            whereConditions.push("t.project_id = ?");
+            queryParams.push(projectIds[0]);
+          } else {
+            const placeholders = projectIds.map(() => '?').join(',');
+            whereConditions.push(`t.project_id IN (${placeholders})`);
+            queryParams.push(...projectIds);
+          }
         }
       }
-    }
 
-    // Handle multiple employeeIds (comma-separated string)
-    if (employeeId && employeeId !== "all") {
-      const employeeIds = String(employeeId).split(',').map(id => id.trim()).filter(id => id);
-      if (employeeIds.length > 0) {
-        if (employeeIds.length === 1) {
-          whereConditions.push("t.assignee_id = ?");
-          queryParams.push(employeeIds[0]);
-        } else {
-          const placeholders = employeeIds.map(() => '?').join(',');
-          whereConditions.push(`t.assignee_id IN (${placeholders})`);
-          queryParams.push(...employeeIds);
+      // For employees: if no employeeId provided, default to their own userId
+      // This ensures employees always see their own data
+      if (userRole === 'employee' && (!employeeId || employeeId === "all") && userId) {
+        whereConditions.push("t.assignee_id = ?");
+        queryParams.push(userId);
+      }
+      // Handle multiple employeeIds (comma-separated string)
+      else if (employeeId && employeeId !== "all") {
+        const employeeIds = String(employeeId).split(',').map(id => id.trim()).filter(id => id);
+        if (employeeIds.length > 0) {
+          if (employeeIds.length === 1) {
+            whereConditions.push("t.assignee_id = ?");
+            queryParams.push(employeeIds[0]);
+          } else {
+            const placeholders = employeeIds.map(() => '?').join(',');
+            whereConditions.push(`t.assignee_id IN (${placeholders})`);
+            queryParams.push(...employeeIds);
+          }
         }
       }
-    }
 
-    if (startDate) {
-      whereConditions.push("DATE(t.due_date) >= ?");
-      queryParams.push(startDate);
-    }
+      if (startDate) {
+        whereConditions.push("DATE(COALESCE(t.due_date, t.created_at)) >= ?");
+        queryParams.push(startDate);
+      }
 
-    if (endDate) {
-      whereConditions.push("DATE(t.due_date) <= ?");
-      queryParams.push(endDate);
-    }
+      if (endDate) {
+        whereConditions.push("DATE(COALESCE(t.due_date, t.created_at)) <= ?");
+        queryParams.push(endDate);
+      }
 
-    const whereClause =
-      whereConditions.length > 0
-        ? `WHERE ${whereConditions.join(" AND ")}`
-        : "";
+      const whereClause =
+        whereConditions.length > 0
+          ? `WHERE ${whereConditions.join(" AND ")}`
+          : "";
 
-    // ✅ Utilization Query: (planned_hours / available_hours) * 100
-    // Simple calculation: total planned hours vs total available hours per week
-    const utilizationQuery = `
+      // For productivity, only consider completed tasks
+      const productivityWhereClause =
+        whereClause && whereClause.trim().length > 0
+          ? `${whereClause} AND t.status = 'completed'`
+          : "WHERE t.status = 'completed'";
+
+      // ✅ Utilization Query: (planned_hours / available_hours) * 100
+      // Use COALESCE(due_date, created_at) to avoid dropping tasks without due_date
+      // Join directly with users since tasks.assignee_id references users.id (not team_members.id)
+      const utilizationQuery = `
       SELECT 
         week,
         SUM(planned_hours) as planned_hours,
@@ -2971,344 +3218,428 @@ app.get("/api/dashboard/data", (req, res) => {
         ROUND((SUM(planned_hours) / NULLIF(SUM(available_hours), 0)) * 100, 1) as utilization_percentage
       FROM (
         SELECT 
-          DATE_FORMAT(t.due_date, '%Y-W%u') as week,
+          DATE_FORMAT(COALESCE(t.due_date, t.created_at), '%Y-W%u') as week,
           t.assignee_id,
           SUM(t.planned_hours) as planned_hours,
-          MAX(u.available_hours_per_week) as available_hours
+          MAX(COALESCE(u.available_hours_per_week, 40)) as available_hours
         FROM tasks t
         JOIN users u ON t.assignee_id = u.id
         ${joinClause}
         ${whereClause}
-        GROUP BY DATE_FORMAT(t.due_date, '%Y-W%u'), t.assignee_id
+        GROUP BY DATE_FORMAT(COALESCE(t.due_date, t.created_at), '%Y-W%u'), t.assignee_id
       ) as employee_utilization
       GROUP BY week
       ORDER BY week ASC
     `;
 
-    // ✅ Productivity Query: Calculate total actual vs planned hours percentage
-    // For all projects/employees: SUM(actual_hours) / SUM(planned_hours) * 100
-    // If productivity_rating exists for tasks, use weighted average: SUM(rating * planned_hours) / SUM(planned_hours)
-    // Otherwise calculate: SUM(actual_hours) / SUM(planned_hours) * 100
-    const productivityQuery = `
+      // ✅ Productivity Query: Calculate total actual vs planned hours percentage
+      // For all projects/employees: SUM(actual_hours) / SUM(planned_hours) * 100
+      // If productivity_rating exists for tasks, use weighted average: SUM(rating * planned_hours) / SUM(planned_hours)
+      // Otherwise calculate: SUM(actual_hours) / SUM(planned_hours) * 100
+      const productivityQuery = `
       SELECT 
-        DATE_FORMAT(t.due_date, '%Y-W%u') as week,
+        DATE_FORMAT(COALESCE(t.due_date, t.created_at), '%Y-W%u') as week,
         COUNT(CASE WHEN t.status = 'completed' THEN 1 END) as completed_tasks,
         SUM(t.actual_hours) as actual_hours,
         SUM(t.planned_hours) as planned_hours,
         CASE 
           WHEN SUM(CASE WHEN t.productivity_rating IS NOT NULL THEN t.planned_hours ELSE 0 END) > 0 THEN
-            -- Use weighted average: SUM(rating * planned_hours) / SUM(planned_hours) for tasks with rating
             ROUND(
               SUM(CASE WHEN t.productivity_rating IS NOT NULL THEN t.productivity_rating * t.planned_hours ELSE 0 END) / 
               NULLIF(SUM(CASE WHEN t.productivity_rating IS NOT NULL THEN t.planned_hours ELSE 0 END), 0),
               1
             )
           ELSE
-            -- Calculate overall: SUM(actual_hours) / SUM(planned_hours) * 100
             ROUND((SUM(t.actual_hours) / NULLIF(SUM(t.planned_hours), 0)) * 100, 1)
         END as productivity_percentage
       FROM tasks t
       JOIN users u ON t.assignee_id = u.id
       ${joinClause}
-      ${whereClause}
-      GROUP BY DATE_FORMAT(t.due_date, '%Y-W%u')
+      ${productivityWhereClause}
+      GROUP BY DATE_FORMAT(COALESCE(t.due_date, t.created_at), '%Y-W%u')
       ORDER BY week ASC
     `;
 
-    // ✅ Team Availability Query: Total Available Hours - Planned Hours per week
-    // Formula: SUM(users.available_hours_per_week) - SUM(tasks.planned_hours WHERE due_date in that week)
-    // Positive values = available hours, Negative values = overutilized hours (shown as red bars in chart)
-    
-    // Build user filter based on project and employee filters
-    let userFilterConditions = [];
-    let availabilityUserParams = [];
-    
-    // Handle multiple employeeIds (comma-separated string)
-    if (employeeId && employeeId !== "all") {
-      const employeeIds = String(employeeId).split(',').map(id => id.trim()).filter(id => id);
-      if (employeeIds.length > 0) {
+      // ✅ Team Availability Query: Total Available Hours - Planned Hours per week
+      // Formula: SUM(users.available_hours_per_week) - SUM(tasks.planned_hours WHERE due_date in that week)
+      // Positive values = available hours, Negative values = overutilized hours (shown as red bars in chart)
+      
+      // Build user filter based on project and employee filters
+      let userFilterConditions = [];
+      let availabilityUserParams = [];
+      
+      // Handle multiple employeeIds (comma-separated string)
+      if (employeeId && employeeId !== "all") {
+        const employeeIds = String(employeeId).split(',').map(id => id.trim()).filter(id => id);
+        if (employeeIds.length > 0) {
+          if (employeeIds.length === 1) {
+            userFilterConditions.push("u.id = ?");
+            availabilityUserParams.push(employeeIds[0]);
+          } else {
+            const placeholders = employeeIds.map(() => '?').join(',');
+            userFilterConditions.push(`u.id IN (${placeholders})`);
+            availabilityUserParams.push(...employeeIds);
+          }
+        }
+      } 
+      // Handle multiple projectIds (comma-separated string) - only if no employee filter
+      else if (projectId && projectId !== "all") {
+        const projectIds = String(projectId).split(',').map(id => id.trim()).filter(id => id);
+        if (projectIds.length > 0) {
+          if (projectIds.length === 1) {
+            userFilterConditions.push("u.id IN (SELECT user_id FROM project_team_members WHERE project_id = ?)");
+            availabilityUserParams.push(projectIds[0]);
+          } else {
+            const placeholders = projectIds.map(() => '?').join(',');
+            userFilterConditions.push(`u.id IN (SELECT user_id FROM project_team_members WHERE project_id IN (${placeholders}))`);
+            availabilityUserParams.push(...projectIds);
+          }
+        }
+      }
+      // If no filters, include all users
+      
+      const userFilterClause = userFilterConditions.length > 0 
+        ? `WHERE ${userFilterConditions.join(" AND ")}`
+        : "";
+      
+      // Get total available hours per week (sum of all relevant users' available_hours_per_week)
+      // Include ALL tasks for that week (even completed ones) - no status filter
+      // Formula: SUM(users.available_hours_per_week) - SUM(tasks.planned_hours)
+      
+      // First, calculate total available hours from relevant users (run this as separate query first)
+      let totalAvailableQuery = "";
+      let totalAvailableParams = [];
+      
+      // Handle multiple employeeIds
+      if (employeeId && employeeId !== "all") {
+        const employeeIds = String(employeeId).split(',').map(id => id.trim()).filter(id => id);
         if (employeeIds.length === 1) {
-          userFilterConditions.push("u.id = ?");
-          availabilityUserParams.push(employeeIds[0]);
+          // Single employee
+          totalAvailableQuery = "SELECT COALESCE(SUM(available_hours_per_week), 0) as total FROM users WHERE id = ?";
+          totalAvailableParams = [employeeIds[0]];
         } else {
+          // Multiple employees
           const placeholders = employeeIds.map(() => '?').join(',');
-          userFilterConditions.push(`u.id IN (${placeholders})`);
-          availabilityUserParams.push(...employeeIds);
+          totalAvailableQuery = `SELECT COALESCE(SUM(available_hours_per_week), 0) as total FROM users WHERE id IN (${placeholders})`;
+          totalAvailableParams = employeeIds;
         }
-      }
-    } 
-    // Handle multiple projectIds (comma-separated string) - only if no employee filter
-    else if (projectId && projectId !== "all") {
-      const projectIds = String(projectId).split(',').map(id => id.trim()).filter(id => id);
-      if (projectIds.length > 0) {
+      } 
+      // Handle multiple projectIds - get users from project_team_members
+      else if (projectId && projectId !== "all") {
+        const projectIds = String(projectId).split(',').map(id => id.trim()).filter(id => id);
         if (projectIds.length === 1) {
-          userFilterConditions.push("u.id IN (SELECT user_id FROM project_team_members WHERE project_id = ?)");
-          availabilityUserParams.push(projectIds[0]);
+          // Single project - get users from project_team_members
+          totalAvailableQuery = `
+            SELECT COALESCE(SUM(COALESCE(u.available_hours_per_week, 40)), 0) as total
+            FROM users u
+            INNER JOIN project_team_members ptm ON u.id = ptm.user_id
+            WHERE ptm.project_id = ?
+          `;
+          totalAvailableParams = [projectIds[0]];
         } else {
+          // Multiple projects
           const placeholders = projectIds.map(() => '?').join(',');
-          userFilterConditions.push(`u.id IN (SELECT user_id FROM project_team_members WHERE project_id IN (${placeholders}))`);
-          availabilityUserParams.push(...projectIds);
+          totalAvailableQuery = `
+            SELECT COALESCE(SUM(COALESCE(u.available_hours_per_week, 40)), 0) as total
+            FROM users u
+            INNER JOIN project_team_members ptm ON u.id = ptm.user_id
+            WHERE ptm.project_id IN (${placeholders})
+          `;
+          totalAvailableParams = projectIds;
         }
-      }
-    }
-    // If no filters, include all users
-    
-    const userFilterClause = userFilterConditions.length > 0 
-      ? `WHERE ${userFilterConditions.join(" AND ")}`
-      : "";
-    
-    // Get total available hours per week (sum of all relevant users' available_hours_per_week)
-    // Include ALL tasks for that week (even completed ones) - no status filter
-    // Formula: SUM(users.available_hours_per_week) - SUM(tasks.planned_hours)
-    
-    // First, calculate total available hours from relevant users (run this as separate query first)
-    let totalAvailableQuery = "";
-    let totalAvailableParams = [];
-    
-    // Handle multiple employeeIds
-    if (employeeId && employeeId !== "all") {
-      const employeeIds = String(employeeId).split(',').map(id => id.trim()).filter(id => id);
-      if (employeeIds.length === 1) {
-        // Single employee
-        totalAvailableQuery = "SELECT COALESCE(SUM(available_hours_per_week), 0) as total FROM users WHERE id = ?";
-        totalAvailableParams = [employeeIds[0]];
+      } 
+      // For managers/team leads without project filter, use their assigned projects
+      // If manager has no assignments, show all users (like super admin)
+      else if (userId && userRole && (userRole === 'manager' || userRole === 'team_lead')) {
+        if (hasAssignments) {
+          // Manager has assignments - get users from assigned projects
+          totalAvailableQuery = `
+            SELECT COALESCE(SUM(COALESCE(u.available_hours_per_week, 40)), 0) as total
+            FROM users u
+            INNER JOIN project_team_members ptm ON u.id = ptm.user_id
+            INNER JOIN project_assignments pa ON ptm.project_id = pa.project_id
+            WHERE pa.assigned_to_user_id = ?
+          `;
+          totalAvailableParams = [userId];
+        } else {
+          // Manager has no assignments - return 0 available hours (shouldn't reach here, but safety check)
+          totalAvailableQuery = "SELECT 0 as total";
+          totalAvailableParams = [];
+        }
       } else {
-        // Multiple employees
-        const placeholders = employeeIds.map(() => '?').join(',');
-        totalAvailableQuery = `SELECT COALESCE(SUM(available_hours_per_week), 0) as total FROM users WHERE id IN (${placeholders})`;
-        totalAvailableParams = employeeIds;
+        // All users
+        totalAvailableQuery = "SELECT COALESCE(SUM(COALESCE(available_hours_per_week, 40)), 0) as total FROM users";
+        totalAvailableParams = [];
       }
-    } 
-    // Handle multiple projectIds
-    else if (projectId && projectId !== "all") {
-      const projectIds = String(projectId).split(',').map(id => id.trim()).filter(id => id);
-      if (projectIds.length === 1) {
-        // Single project
-        totalAvailableQuery = `
-          SELECT COALESCE(SUM(u.available_hours_per_week), 0) as total
-          FROM users u
-          INNER JOIN project_team_members ptm ON u.id = ptm.user_id
-          WHERE ptm.project_id = ?
-        `;
-        totalAvailableParams = [projectIds[0]];
-      } else {
-        // Multiple projects
-        const placeholders = projectIds.map(() => '?').join(',');
-        totalAvailableQuery = `
-          SELECT COALESCE(SUM(u.available_hours_per_week), 0) as total
-          FROM users u
-          INNER JOIN project_team_members ptm ON u.id = ptm.user_id
-          WHERE ptm.project_id IN (${placeholders})
-        `;
-        totalAvailableParams = projectIds;
-      }
-    } 
-    // For managers/team leads without project filter, use their assigned projects
-    else if (userId && userRole && (userRole === 'manager' || userRole === 'team_lead')) {
-      totalAvailableQuery = `
-        SELECT COALESCE(SUM(u.available_hours_per_week), 0) as total
-        FROM users u
-        INNER JOIN project_team_members ptm ON u.id = ptm.user_id
-        INNER JOIN project_assignments pa ON ptm.project_id = pa.project_id
-        WHERE pa.assigned_to_user_id = ?
-      `;
-      totalAvailableParams = [userId];
-    } else {
-      // All users
-      totalAvailableQuery = "SELECT COALESCE(SUM(available_hours_per_week), 0) as total FROM users";
-      totalAvailableParams = [];
-    }
-    
-    // Simplified approach: Calculate availability per week directly
-    // Return negative values for overutilization (when planned > available)
-    // Positive values = available hours, Negative values = overutilized hours
-    // Note: Week generation will be handled in the merge step, so we just calculate for existing weeks
-    const availabilityQuery = `
+      
+      // Simplified approach: Calculate availability per week directly
+      // Return negative values for overutilization (when planned > available)
+      // Positive values = available hours, Negative values = overutilized hours
+      // Note: Week generation will be handled in the merge step, so we just calculate for existing weeks
+      const availabilityQuery = `
       SELECT 
         week,
         COALESCE(?, 0) - COALESCE(SUM(total_planned_hours), 0) as available_hours
       FROM (
-        -- Get total planned hours from ALL tasks for each week (no status filter - includes completed)
         SELECT 
-          DATE_FORMAT(t.due_date, '%Y-W%u') as week,
+          DATE_FORMAT(COALESCE(t.due_date, t.created_at), '%Y-W%u') as week,
           SUM(t.planned_hours) as total_planned_hours
         FROM tasks t
         ${joinClause}
         ${whereClause}
-        GROUP BY DATE_FORMAT(t.due_date, '%Y-W%u')
+        GROUP BY DATE_FORMAT(COALESCE(t.due_date, t.created_at), '%Y-W%u')
       ) as availability_calc
       GROUP BY week
       ORDER BY week ASC
     `;
-    
-    // Params: total available hours + where clause params for tasks
-    const availabilityParamsBase = [...queryParams];
+      
+      // Params: total available hours + where clause params for tasks
+      const availabilityParamsBase = [...queryParams];
 
-    // Execute all queries
-    pool.execute(utilizationQuery, queryParams, (err, utilizationRows) => {
-      if (err) {
-        console.error("Utilization query error:", err);
-        return res
-          .status(500)
-          .json({ error: "Database error", details: err.message });
-      }
-
-      pool.execute(productivityQuery, queryParams, (err, productivityRows) => {
+      // Execute all queries
+      pool.execute(utilizationQuery, queryParams, (err, utilizationRows) => {
         if (err) {
-          console.error("Productivity query error:", err);
+          console.error("Utilization query error:", err);
           return res
             .status(500)
             .json({ error: "Database error", details: err.message });
         }
 
-        // First, get total available hours from relevant users
-        pool.execute(totalAvailableQuery, totalAvailableParams, (err, totalAvailableRows) => {
+        pool.execute(productivityQuery, queryParams, (err, productivityRows) => {
           if (err) {
-            console.error("Total available hours query error:", err);
+            console.error("Productivity query error:", err);
             return res
               .status(500)
               .json({ error: "Database error", details: err.message });
           }
-          
-          const totalAvailableHours = parseFloat(totalAvailableRows[0]?.total) || 0;
-          console.log("Total Available Hours (from users):", totalAvailableHours);
-          console.log("Total Available Query:", totalAvailableQuery);
-          console.log("Total Available Params:", totalAvailableParams);
-          
-          // Now execute availability query with total available hours as first param
-          const availabilityParams = [totalAvailableHours, ...availabilityParamsBase];
-          
-          console.log("Availability Query:", availabilityQuery.replace(/\s+/g, ' ').substring(0, 500));
-          console.log("Availability Params Count:", availabilityParams.length);
-          console.log("Availability Params:", availabilityParams);
-          
-          pool.execute(
-            availabilityQuery,
-            availabilityParams,
-            (err, availabilityRows) => {
-              if (err) {
-                console.error("Availability query error:", err);
-                return res
-                  .status(500)
-                  .json({ error: "Database error", details: err.message });
-              }
-              
-              console.log("Availability Raw Results:", availabilityRows);
 
-              console.log("Utilization rows:", utilizationRows.length);
-              console.log("Productivity rows:", productivityRows.length);
-              console.log("Availability rows:", availabilityRows.length);
-
-              // ✅ Format individual datasets
-              const utilizationData = utilizationRows.map((row) => ({
-                week: row.week,
-                utilization: parseFloat(row.utilization_percentage) || 0,
-                availableHours: parseInt(row.available_hours) || 0,
-                plannedHours: parseInt(row.planned_hours) || 0,
-              }));
-
-              const productivityData = productivityRows.map((row) => ({
-                week: row.week,
-                completed: parseInt(row.completed_tasks) || 0,
-                hours: parseFloat(row.actual_hours) || 0,
-                productivity: parseFloat(row.productivity_percentage) || 0,
-                plannedHours: parseFloat(row.planned_hours) || 0,
-              }));
-
-              const availabilityData = availabilityRows.map((row) => {
-                const hours = parseFloat(row.available_hours) || 0;
-                return {
-                  week: row.week,
-                  availableHours: hours,
-                };
-              });
-
-            // ✅ Generate all weeks in range (fill missing)
-            function generateWeekRange(start, end) {
-              const result = [];
-              const startDateObj = new Date(start);
-              const endDateObj = new Date(end);
-
-              const curr = new Date(startDateObj);
-              curr.setDate(curr.getDate() - curr.getDay() + 1);
-
-              while (curr <= endDateObj) {
-                const year = curr.getFullYear();
-                const week = getWeekNumber(curr);
-                result.push(`${year}-W${week.toString().padStart(2, "0")}`);
-                curr.setDate(curr.getDate() + 7);
-              }
-
-              return result;
+          // First, get total available hours from relevant users
+          pool.execute(totalAvailableQuery, totalAvailableParams, (err, totalAvailableRows) => {
+            if (err) {
+              console.error("Total available hours query error:", err);
+              return res
+                .status(500)
+                .json({ error: "Database error", details: err.message });
             }
-
-            function getWeekNumber(d) {
-              d = new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()));
-              const dayNum = d.getUTCDay() || 7;
-              d.setUTCDate(d.getUTCDate() + 4 - dayNum);
-              const yearStart = new Date(Date.UTC(d.getUTCFullYear(), 0, 1));
-              return Math.ceil(((d - yearStart) / 86400000 + 1) / 7);
-            }
-
-            const allWeeks =
-              startDate && endDate
-                ? generateWeekRange(startDate, endDate)
-                : Array.from(
-                    new Set([
-                      ...utilizationData.map((d) => d.week),
-                      ...productivityData.map((d) => d.week),
-                      ...availabilityData.map((d) => d.week),
-                    ])
-                  );
-
-              // ✅ Merge all datasets ensuring full week coverage
-              // For weeks with no tasks, use totalAvailableHours as availableHours
-              const mergedData = allWeeks.map((week) => {
-                const util = utilizationData.find((d) => d.week === week) || {
-                  utilization: 0,
-                  availableHours: 0,
-                  plannedHours: 0,
-                };
-                const prod = productivityData.find((d) => d.week === week) || {
-                  completed: 0,
-                  hours: 0,
-                  productivity: 0,
-                  plannedHours: 0,
-                };
-                const avail = availabilityData.find((d) => d.week === week);
+            
+            const totalAvailableHours = parseFloat(totalAvailableRows[0]?.total) || 0;
+            console.log("Total Available Hours (from users):", totalAvailableHours);
+            console.log("Total Available Query:", totalAvailableQuery);
+            console.log("Total Available Params:", totalAvailableParams);
+            
+            // Now execute availability query with total available hours as first param
+            const availabilityParams = [totalAvailableHours, ...availabilityParamsBase];
+            
+            console.log("Availability Query:", availabilityQuery.replace(/\s+/g, ' ').substring(0, 500));
+            console.log("Availability Params Count:", availabilityParams.length);
+            console.log("Availability Params:", availabilityParams);
+            
+            pool.execute(
+              availabilityQuery,
+              availabilityParams,
+              (err, availabilityRows) => {
+                if (err) {
+                  console.error("Availability query error:", err);
+                  return res
+                    .status(500)
+                    .json({ error: "Database error", details: err.message });
+                }
                 
-                // If no tasks for this week, availability = total available hours
-                // Otherwise use calculated availability (can be negative for overutilization)
-                const availableHours = avail 
-                  ? avail.availableHours 
-                  : totalAvailableHours; // Use total available hours if no tasks in this week
+                console.log("Availability Raw Results:", availabilityRows);
 
-                return {
-                  week,
-                  utilization: util.utilization,
-                  completed: prod.completed,
-                  hours: prod.hours,
-                  productivity: prod.productivity,
-                  plannedHours: prod.plannedHours,
-                  availableHours: availableHours,
-                };
-              });
+                console.log("Utilization rows:", utilizationRows.length);
+                console.log("Productivity rows:", productivityRows.length);
+                console.log("Availability rows:", availabilityRows.length);
+                console.log("Total Available Hours:", totalAvailableHours);
+                console.log("Utilization query:", utilizationQuery.replace(/\s+/g, ' ').substring(0, 300));
+                console.log("Productivity query:", productivityQuery.replace(/\s+/g, ' ').substring(0, 300));
+                console.log("Join clause:", joinClause);
+                console.log("Where clause:", whereClause);
+                console.log("Query params:", queryParams);
 
-              console.log(
-                "Merged data weeks:",
-                mergedData.map((d) => d.week)
-              );
+                // ✅ Format individual datasets
+                const utilizationData = utilizationRows.map((row) => {
+                  const utilPercent = row.utilization_percentage !== null && row.utilization_percentage !== undefined 
+                    ? parseFloat(row.utilization_percentage) 
+                    : null;
+                  return {
+                    week: row.week,
+                    utilization: (utilPercent !== null && !isNaN(utilPercent)) ? utilPercent : null,
+                    availableHours: parseInt(row.available_hours) || 0,
+                    plannedHours: parseInt(row.planned_hours) || 0,
+                  };
+                });
 
-            res.json({
-              utilizationData: mergedData,
-              productivityData: mergedData,
-              availabilityData: mergedData,
-            });
-          }
-        );
+                const productivityData = productivityRows.map((row) => {
+                  const prodPercent = row.productivity_percentage !== null && row.productivity_percentage !== undefined 
+                    ? parseFloat(row.productivity_percentage) 
+                    : null;
+                  return {
+                    week: row.week,
+                    completed: parseInt(row.completed_tasks) || 0,
+                    hours: parseFloat(row.actual_hours) || 0,
+                    productivity: (prodPercent !== null && !isNaN(prodPercent)) ? prodPercent : null,
+                    plannedHours: parseFloat(row.planned_hours) || 0,
+                  };
+                });
+
+                const availabilityData = availabilityRows.map((row) => {
+                  const hours = parseFloat(row.available_hours) || 0;
+                  return {
+                    week: row.week,
+                    availableHours: hours,
+                  };
+                });
+
+                // ✅ Generate all weeks in range (fill missing)
+                function generateWeekRange(start, end) {
+                  const result = [];
+                  const startDateObj = new Date(start);
+                  const endDateObj = new Date(end);
+
+                  const curr = new Date(startDateObj);
+                  curr.setDate(curr.getDate() - curr.getDay() + 1);
+
+                  while (curr <= endDateObj) {
+                    const year = curr.getFullYear();
+                    const week = getWeekNumber(curr);
+                    result.push(`${year}-W${week.toString().padStart(2, "0")}`);
+                    curr.setDate(curr.getDate() + 7);
+                  }
+
+                  return result;
+                }
+
+                function getWeekNumber(d) {
+                  d = new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()));
+                  const dayNum = d.getUTCDay() || 7;
+                  d.setUTCDate(d.getUTCDate() + 4 - dayNum);
+                  const yearStart = new Date(Date.UTC(d.getUTCFullYear(), 0, 1));
+                  return Math.ceil(((d - yearStart) / 86400000 + 1) / 7);
+                }
+
+                const allWeeks =
+                  startDate && endDate
+                    ? generateWeekRange(startDate, endDate)
+                    : Array.from(
+                        new Set([
+                          ...utilizationData.map((d) => d.week),
+                          ...productivityData.map((d) => d.week),
+                          ...availabilityData.map((d) => d.week),
+                        ])
+                      );
+
+                // ✅ Merge all datasets ensuring full week coverage
+                // For weeks with no tasks, use totalAvailableHours as availableHours
+                const mergedData = allWeeks.map((week) => {
+                  const util = utilizationData.find((d) => d.week === week);
+                  const prod = productivityData.find((d) => d.week === week);
+                  const avail = availabilityData.find((d) => d.week === week);
+                  
+                  // For utilization calculation, we need total available hours (from users)
+                  // Use util.availableHours if available (from utilization query), otherwise use totalAvailableHours
+                  const totalAvailableHoursForWeek = util && util.availableHours > 0 
+                    ? util.availableHours 
+                    : totalAvailableHours;
+                  
+                  // For availability chart, use remaining available hours (can be negative for overutilization)
+                  const remainingAvailableHours = avail 
+                    ? avail.availableHours 
+                    : totalAvailableHours; // Use total available hours if no tasks in this week
+
+                  return {
+                    week,
+                    utilization: util && util.utilization !== null ? util.utilization : null,
+                    completed: prod ? prod.completed : 0,
+                    hours: prod ? prod.hours : 0,
+                    productivity: prod && prod.productivity !== null ? prod.productivity : null,
+                    plannedHours: prod ? prod.plannedHours : 0,
+                    availableHours: remainingAvailableHours, // For availability chart (remaining hours)
+                    totalAvailableHours: totalAvailableHoursForWeek, // For utilization calculation (total hours)
+                  };
+                });
+
+                console.log(
+                  "Merged data weeks:",
+                  mergedData.map((d) => d.week)
+                );
+                console.log(
+                  "Sample merged data (first 3 weeks):",
+                  mergedData.slice(0, 3).map(d => ({
+                    week: d.week,
+                    utilization: d.utilization,
+                    productivity: d.productivity,
+                    plannedHours: d.plannedHours,
+                    availableHours: d.availableHours
+                  }))
+                );
+                console.log(
+                  "Utilization query results (first 3):",
+                  utilizationRows.slice(0, 3)
+                );
+                console.log(
+                  "Productivity query results (first 3):",
+                  productivityRows.slice(0, 3)
+                );
+
+                // Return all weeks in the date range (similar to how task status returns all tasks)
+                // Don't filter out weeks - let the frontend handle display logic
+                // This ensures charts always show data for the selected date range
+                res.json({
+                  utilizationData: mergedData,
+                  productivityData: mergedData,
+                  availabilityData: mergedData,
+                });
+              }
+            );
+          });
         });
       });
-    });
+    } // End of continueDashboardDataQuery function
+
+    // If user is manager/team_lead, filter tasks by their assigned projects
+    // If manager has no project assignments, show all tasks (like super admin)
+    if (userId && userRole && (userRole === 'manager' || userRole === 'team_lead')) {
+      // First check if manager has any project assignments
+      const checkAssignmentsQuery = `
+        SELECT COUNT(*) as count
+        FROM project_assignments
+        WHERE assigned_to_user_id = ?
+      `;
+      
+      pool.execute(checkAssignmentsQuery, [userId], (checkErr, checkRows) => {
+        if (checkErr) {
+          console.error("Check assignments error:", checkErr);
+          return res.json({
+            utilizationData: [],
+            productivityData: [],
+            availabilityData: [],
+          });
+        }
+        
+        const hasAssignments = checkRows[0]?.count > 0;
+        
+        if (hasAssignments) {
+          // Manager has assignments - filter by assigned projects
+          joinClause = "INNER JOIN project_assignments pa ON t.project_id = pa.project_id";
+          whereConditions.push("pa.assigned_to_user_id = ?");
+          queryParams.push(userId);
+          // Continue with the rest of the dashboard data query building...
+          // Pass hasAssignments flag so totalAvailableQuery can use correct users
+          continueDashboardDataQuery(hasAssignments);
+        } else {
+          // Manager has no assignments - return empty data (security: don't show other managers' data)
+          return res.json({
+            utilizationData: [],
+            productivityData: [],
+            availabilityData: [],
+          });
+        }
+      });
+    } else {
+      // Super admin or employee - build and execute query directly
+      continueDashboardDataQuery();
+    }
   } catch (error) {
     console.error("Dashboard data error:", error);
     res.json({
@@ -3327,28 +3658,77 @@ app.get("/api/dashboard/projects", (req, res) => {
   let params = [];
 
   // If userId and userRole are provided and user is manager/team_lead, filter by assignments
+  // If manager has no project assignments, show all projects (like super admin)
   if (userId && userRole && (userRole === 'manager' || userRole === 'team_lead')) {
+    // First check if manager has any project assignments
+    const checkAssignmentsQuery = `
+      SELECT COUNT(*) as count
+      FROM project_assignments
+      WHERE assigned_to_user_id = ?
+    `;
+    
+    pool.execute(checkAssignmentsQuery, [userId], (checkErr, checkRows) => {
+      if (checkErr) {
+        console.error("Check assignments error:", checkErr);
+        return res.status(500).json({ error: "Database error" });
+      }
+      
+      const hasAssignments = checkRows[0]?.count > 0;
+      
+      if (hasAssignments) {
+        // Manager has assignments - show assigned projects
+        query = `
+          SELECT DISTINCT p.id, p.name, p.status
+          FROM projects p
+          INNER JOIN project_assignments pa ON p.id = pa.project_id
+          WHERE pa.assigned_to_user_id = ?
+          ORDER BY p.name
+        `;
+        params = [userId];
+        } else {
+          // Manager has no assignments - show empty (security: don't show other managers' data)
+          return res.json([]);
+        }
+        
+        pool.execute(query, params, (err, results) => {
+          if (err) {
+            console.error("Projects filter error:", err);
+            return res.status(500).json({ error: "Failed to fetch projects" });
+          }
+          res.json(results);
+        });
+    });
+  } else if (userId && userRole && userRole === 'employee') {
+    // For employees, show only projects they are assigned to (via project_team_members)
     query = `
       SELECT DISTINCT p.id, p.name, p.status
       FROM projects p
-      INNER JOIN project_assignments pa ON p.id = pa.project_id
-      WHERE pa.assigned_to_user_id = ?
+      INNER JOIN project_team_members ptm ON p.id = ptm.project_id
+      WHERE ptm.user_id = ?
       ORDER BY p.name
     `;
     params = [userId];
+    
+    pool.execute(query, params, (err, results) => {
+      if (err) {
+        console.error("Projects filter error:", err);
+        return res.status(500).json({ error: "Failed to fetch projects" });
+      }
+      res.json(results);
+    });
   } else {
-    // Super admin or employee: show all projects
+    // Super admin: show all projects
     query = "SELECT id, name, status FROM projects ORDER BY name";
     params = [];
+    
+    pool.execute(query, params, (err, results) => {
+      if (err) {
+        console.error("Projects filter error:", err);
+        return res.status(500).json({ error: "Failed to fetch projects" });
+      }
+      res.json(results);
+    });
   }
-
-  pool.execute(query, params, (err, results) => {
-    if (err) {
-      console.error("Projects filter error:", err);
-      return res.status(500).json({ error: "Failed to fetch projects" });
-    }
-    res.json(results);
-  });
 });
 
 // Get employees for filter dropdown (optionally filtered by project)
@@ -3366,43 +3746,84 @@ app.get("/api/dashboard/employees", (req, res) => {
       // If projectId(s) provided, only return employees assigned to those projects
       // Also check if user has access to these projects (for managers/team leads)
       if (userId && userRole && (userRole === 'manager' || userRole === 'team_lead')) {
-        // Verify user has access to all projects
-        const placeholders = projectIds.map(() => '?').join(',');
-        const checkAccessQuery = `
-          SELECT DISTINCT project_id FROM project_assignments 
-          WHERE project_id IN (${placeholders}) AND assigned_to_user_id = ?
+        // First check if manager has any project assignments at all
+        const checkAssignmentsQuery = `
+          SELECT COUNT(*) as count
+          FROM project_assignments
+          WHERE assigned_to_user_id = ?
         `;
-        pool.execute(checkAccessQuery, [...projectIds, userId], (checkErr, checkRows) => {
-          if (checkErr) {
-            console.error("Access check error:", checkErr);
+        
+        pool.execute(checkAssignmentsQuery, [userId], (checkAssignErr, checkAssignRows) => {
+          if (checkAssignErr) {
+            console.error("Check assignments error:", checkAssignErr);
             return res.status(500).json({ error: "Database error" });
           }
-          if (!checkRows || checkRows.length === 0) {
-            return res.json([]); // No access, return empty
-          }
+          
+          const hasAnyAssignments = checkAssignRows[0]?.count > 0;
+          
+          if (hasAnyAssignments) {
+            // Manager has assignments - verify user has access to requested projects
+            const placeholders = projectIds.map(() => '?').join(',');
+            const checkAccessQuery = `
+              SELECT DISTINCT project_id FROM project_assignments 
+              WHERE project_id IN (${placeholders}) AND assigned_to_user_id = ?
+            `;
+            pool.execute(checkAccessQuery, [...projectIds, userId], (checkErr, checkRows) => {
+              if (checkErr) {
+                console.error("Access check error:", checkErr);
+                return res.status(500).json({ error: "Database error" });
+              }
+              if (!checkRows || checkRows.length === 0) {
+                return res.json([]); // No access to these specific projects, return empty
+              }
 
-          // User has access, return employees for these projects
-          const employeePlaceholders = projectIds.map(() => '?').join(',');
-          query = `
-            SELECT DISTINCT 
-              u.id, 
-              u.username, 
-              u.email, 
-              u.role, 
-              u.available_hours_per_week 
-            FROM users u
-            INNER JOIN project_team_members ptm ON u.id = ptm.user_id
-            WHERE ptm.project_id IN (${employeePlaceholders})
-            ORDER BY u.username
-          `;
-          params = projectIds;
-          pool.execute(query, params, (err, results) => {
-            if (err) {
-              console.error("Employees filter error:", err);
-              return res.status(500).json({ error: "Failed to fetch employees" });
-            }
-            res.json(results);
-          });
+              // User has access, return employees for these projects
+              const employeePlaceholders = projectIds.map(() => '?').join(',');
+              query = `
+                SELECT DISTINCT 
+                  u.id, 
+                  u.username, 
+                  u.email, 
+                  u.role, 
+                  u.available_hours_per_week 
+                FROM users u
+                INNER JOIN project_team_members ptm ON u.id = ptm.user_id
+                WHERE ptm.project_id IN (${employeePlaceholders})
+                ORDER BY u.username
+              `;
+              params = projectIds;
+              pool.execute(query, params, (err, results) => {
+                if (err) {
+                  console.error("Employees filter error:", err);
+                  return res.status(500).json({ error: "Failed to fetch employees" });
+                }
+                res.json(results);
+              });
+            });
+          } else {
+            // Manager has no assignments at all - show employees for requested projects
+            const employeePlaceholders = projectIds.map(() => '?').join(',');
+            query = `
+              SELECT DISTINCT 
+                u.id, 
+                u.username, 
+                u.email, 
+                u.role, 
+                u.available_hours_per_week 
+              FROM users u
+              INNER JOIN project_team_members ptm ON u.id = ptm.user_id
+              WHERE ptm.project_id IN (${employeePlaceholders})
+              ORDER BY u.username
+            `;
+            params = projectIds;
+            pool.execute(query, params, (err, results) => {
+              if (err) {
+                console.error("Employees filter error:", err);
+                return res.status(500).json({ error: "Failed to fetch employees" });
+              }
+              res.json(results);
+            });
+          }
         });
         return;
       } else {
@@ -3442,21 +3863,51 @@ app.get("/api/dashboard/employees", (req, res) => {
   } else {
     // No project filter - return employees based on user role
     if (userId && userRole && (userRole === 'manager' || userRole === 'team_lead')) {
-      // For managers/team leads, only show employees from their assigned projects
-      query = `
-        SELECT DISTINCT 
-          u.id, 
-          u.username, 
-          u.email, 
-          u.role, 
-          u.available_hours_per_week 
-        FROM users u
-        INNER JOIN project_team_members ptm ON u.id = ptm.user_id
-        INNER JOIN project_assignments pa ON ptm.project_id = pa.project_id
-        WHERE pa.assigned_to_user_id = ?
-        ORDER BY u.username
+      // First check if manager has any project assignments
+      const checkAssignmentsQuery = `
+        SELECT COUNT(*) as count
+        FROM project_assignments
+        WHERE assigned_to_user_id = ?
       `;
-      params = [userId];
+      
+      pool.execute(checkAssignmentsQuery, [userId], (checkErr, checkRows) => {
+        if (checkErr) {
+          console.error("Check assignments error:", checkErr);
+          return res.status(500).json({ error: "Database error" });
+        }
+        
+        const hasAssignments = checkRows[0]?.count > 0;
+        
+        if (hasAssignments) {
+          // Manager has assignments - show employees from assigned projects
+          query = `
+            SELECT DISTINCT 
+              u.id, 
+              u.username, 
+              u.email, 
+              u.role, 
+              u.available_hours_per_week 
+            FROM users u
+            INNER JOIN project_team_members ptm ON u.id = ptm.user_id
+            INNER JOIN project_assignments pa ON ptm.project_id = pa.project_id
+            WHERE pa.assigned_to_user_id = ?
+            ORDER BY u.username
+          `;
+          params = [userId];
+        } else {
+          // Manager has no assignments - show empty (security: don't show other managers' data)
+          return res.json([]);
+        }
+        
+        pool.execute(query, params, (err, results) => {
+          if (err) {
+            console.error("Employees filter error:", err);
+            return res.status(500).json({ error: "Failed to fetch employees" });
+          }
+          res.json(results);
+        });
+      });
+      return;
     } else {
       // Super admin or employee - return all employees
       query = "SELECT id, username, email, role, available_hours_per_week FROM users ORDER BY username";
@@ -3484,102 +3935,144 @@ app.get("/api/dashboard/task-status", (req, res) => {
   let queryParams = [];
   let joinClause = "";
 
-  // If user is manager/team_lead, filter tasks by their assigned projects
-  if (userId && userRole && (userRole === 'manager' || userRole === 'team_lead')) {
-    joinClause = "INNER JOIN project_assignments pa ON t.project_id = pa.project_id";
-    whereConditions.push("pa.assigned_to_user_id = ?");
-    queryParams.push(userId);
-  }
-
-  // Handle multiple projectIds (comma-separated string)
-  if (projectId && projectId !== "all") {
-    const projectIds = String(projectId).split(',').map(id => id.trim()).filter(id => id);
-    if (projectIds.length > 0) {
-      if (projectIds.length === 1) {
-        whereConditions.push("t.project_id = ?");
-        queryParams.push(projectIds[0]);
-      } else {
-        const placeholders = projectIds.map(() => '?').join(',');
-        whereConditions.push(`t.project_id IN (${placeholders})`);
-        queryParams.push(...projectIds);
+  // Helper function to build and execute the query
+  function buildAndExecuteTaskStatusQuery() {
+    // Handle multiple projectIds (comma-separated string)
+    if (projectId && projectId !== "all") {
+      const projectIds = String(projectId).split(',').map(id => id.trim()).filter(id => id);
+      if (projectIds.length > 0) {
+        if (projectIds.length === 1) {
+          whereConditions.push("t.project_id = ?");
+          queryParams.push(projectIds[0]);
+        } else {
+          const placeholders = projectIds.map(() => '?').join(',');
+          whereConditions.push(`t.project_id IN (${placeholders})`);
+          queryParams.push(...projectIds);
+        }
       }
     }
-  }
 
-  // Handle multiple employeeIds (comma-separated string)
-  if (employeeId && employeeId !== "all") {
-    const employeeIds = String(employeeId).split(',').map(id => id.trim()).filter(id => id);
-    if (employeeIds.length > 0) {
-      if (employeeIds.length === 1) {
-        whereConditions.push("t.assignee_id = ?");
-        queryParams.push(employeeIds[0]);
-      } else {
-        const placeholders = employeeIds.map(() => '?').join(',');
-        whereConditions.push(`t.assignee_id IN (${placeholders})`);
-        queryParams.push(...employeeIds);
+    // For employees: if no employeeId provided, default to their own userId
+    // This ensures employees always see their own task status
+    if (userRole === 'employee' && (!employeeId || employeeId === "all") && userId) {
+      whereConditions.push("t.assignee_id = ?");
+      queryParams.push(userId);
+    }
+    // Handle multiple employeeIds (comma-separated string)
+    else if (employeeId && employeeId !== "all") {
+      const employeeIds = String(employeeId).split(',').map(id => id.trim()).filter(id => id);
+      if (employeeIds.length > 0) {
+        if (employeeIds.length === 1) {
+          whereConditions.push("t.assignee_id = ?");
+          queryParams.push(employeeIds[0]);
+        } else {
+          const placeholders = employeeIds.map(() => '?').join(',');
+          whereConditions.push(`t.assignee_id IN (${placeholders})`);
+          queryParams.push(...employeeIds);
+        }
       }
     }
-  }
 
-  // Use due_date for consistency with other dashboard queries
-  // Only filter by date if dates are provided, and exclude tasks without due_date if dates are provided
-  if (startDate) {
-    whereConditions.push("t.due_date IS NOT NULL");
-    whereConditions.push("DATE(t.due_date) >= ?");
-    queryParams.push(startDate);
-  }
-
-  if (endDate) {
-    whereConditions.push("DATE(t.due_date) <= ?");
-    queryParams.push(endDate);
-  }
-
-  const whereClause =
-    whereConditions.length > 0 ? `WHERE ${whereConditions.join(" AND ")}` : "";
-
-  const query = `
-    SELECT 
-      t.status,
-      COUNT(*) as count
-    FROM tasks t
-    ${joinClause}
-    ${whereClause}
-    GROUP BY t.status
-  `;
-
-  console.log("Executing task status query:", query);
-  console.log("Query params:", queryParams);
-
-  pool.execute(query, queryParams, (err, results) => {
-    if (err) {
-      console.error("Task status error:", err);
-      return res
-        .status(500)
-        .json({ error: "Failed to fetch task status data" });
+    // Filter by date using COALESCE(due_date, created_at) to include tasks without due_date
+    if (startDate) {
+      whereConditions.push("DATE(COALESCE(t.due_date, t.created_at)) >= ?");
+      queryParams.push(startDate);
     }
 
-    console.log("Task status raw results:", results);
+    if (endDate) {
+      whereConditions.push("DATE(COALESCE(t.due_date, t.created_at)) <= ?");
+      queryParams.push(endDate);
+    }
 
-    // Convert array to object format
-    const statusData = {
-      todo: 0,
-      in_progress: 0,
-      completed: 0,
-      blocked: 0,
-    };
+    const whereClause =
+      whereConditions.length > 0 ? `WHERE ${whereConditions.join(" AND ")}` : "";
 
-    results.forEach((row) => {
-      if (statusData.hasOwnProperty(row.status)) {
-        statusData[row.status] = row.count;
+    const query = `
+      SELECT 
+        t.status,
+        COUNT(*) as count
+      FROM tasks t
+      ${joinClause}
+      ${whereClause}
+      GROUP BY t.status
+    `;
+
+    console.log("Executing task status query:", query);
+    console.log("Query params:", queryParams);
+
+    pool.execute(query, queryParams, (err, results) => {
+      if (err) {
+        console.error("Task status error:", err);
+        return res
+          .status(500)
+          .json({ error: "Failed to fetch task status data" });
       }
+
+      console.log("Task status raw results:", results);
+
+      // Convert array to object format
+      const statusData = {
+        todo: 0,
+        in_progress: 0,
+        completed: 0,
+        blocked: 0,
+      };
+
+      results.forEach((row) => {
+        if (statusData.hasOwnProperty(row.status)) {
+          statusData[row.status] = row.count;
+        }
+      });
+
+      // Calculate totals for logging
+      const totalTasks = statusData.todo + statusData.in_progress + statusData.completed + statusData.blocked;
+      console.log("Task status response:", { ...statusData, totalTasks });
+
+      res.json(statusData);
     });
+  }
 
-    // Calculate totals for logging
-    const totalTasks = statusData.todo + statusData.in_progress + statusData.completed + statusData.blocked;
-    console.log("Task status response:", { ...statusData, totalTasks });
-
-    res.json(statusData);
-  });
+  // If user is manager/team_lead, filter tasks by their assigned projects
+  // If manager has no project assignments, show all tasks (like super admin)
+  if (userId && userRole && (userRole === 'manager' || userRole === 'team_lead')) {
+    // First check if manager has any project assignments
+    const checkAssignmentsQuery = `
+      SELECT COUNT(*) as count
+      FROM project_assignments
+      WHERE assigned_to_user_id = ?
+    `;
+    
+    pool.execute(checkAssignmentsQuery, [userId], (checkErr, checkRows) => {
+      if (checkErr) {
+        console.error("Check assignments error:", checkErr);
+        return res.status(500).json({ error: "Database error" });
+      }
+      
+      const hasAssignments = checkRows[0]?.count > 0;
+      
+      if (hasAssignments) {
+        // Manager has assignments - filter by assigned projects
+        joinClause = "INNER JOIN project_assignments pa ON t.project_id = pa.project_id";
+        whereConditions.push("pa.assigned_to_user_id = ?");
+        queryParams.push(userId);
+      } else {
+        // Manager has no assignments - return empty task status (security: don't show other managers' data)
+        return res.json({
+          todo: 0,
+          in_progress: 0,
+          completed: 0,
+          blocked: 0,
+          totalTasks: 0
+        });
+      }
+      
+      // Continue with the rest of the query building
+      buildAndExecuteTaskStatusQuery();
+    });
+  } else {
+    // Super admin or employee - build and execute query directly
+    buildAndExecuteTaskStatusQuery();
+  }
 });
 
 // Role-aware tasks timeline for dashboard (this week and next week)
@@ -3636,10 +4129,17 @@ app.get("/api/dashboard/tasks-timeline", (req, res) => {
     // Base conditions
     const conditions = [];
     const params = [];
+    let joinClause = "";
 
-    // Role restriction: employees and team_leads only see own tasks unless employeeId provided
+    // If manager/team_lead, always filter by their assigned projects
+    if (userId && role && (role === 'manager' || role === 'team_lead')) {
+      joinClause = "INNER JOIN project_assignments pa ON t.project_id = pa.project_id";
+      conditions.push("pa.assigned_to_user_id = ?");
+      params.push(userId);
+    }
+
+    // Role restriction: employees only see own tasks unless employeeId provided
     if (employeeId && employeeId !== "all") {
-      // Handle multiple employeeIds (comma-separated string)
       const employeeIds = String(employeeId).split(',').map(id => id.trim()).filter(id => id);
       if (employeeIds.length > 0) {
         if (employeeIds.length === 1) {
@@ -3651,12 +4151,12 @@ app.get("/api/dashboard/tasks-timeline", (req, res) => {
           params.push(...employeeIds);
         }
       }
-    } else if (role === "employee" || role === "team_lead") {
+    } else if (role === "employee") {
       conditions.push("t.assignee_id = ?");
       params.push(userId);
     }
 
-    // Handle multiple projectIds (comma-separated string)
+    // Handle multiple projectIds
     if (projectId && projectId !== "all") {
       const projectIds = String(projectId).split(',').map(id => id.trim()).filter(id => id);
       if (projectIds.length > 0) {
@@ -3671,35 +4171,117 @@ app.get("/api/dashboard/tasks-timeline", (req, res) => {
       }
     }
 
-    const baseWhere = conditions.length
-      ? `AND ${conditions.join(" AND ")}`
-      : "";
+    // Format date as YYYY-MM-DD in local timezone
+    function formatDate(d) {
+      const year = d.getFullYear();
+      const month = String(d.getMonth() + 1).padStart(2, '0');
+      const day = String(d.getDate()).padStart(2, '0');
+      return `${year}-${month}-${day}`;
+    }
+    
+    // ✅ FIXED: Calculate week boundaries based on current date
+    const now = new Date();
+    now.setHours(0, 0, 0, 0); // Reset to start of day
+    
+    // This Week: From today up to and including next Saturday
+    const todayStr = formatDate(now);
+    
+    // Calculate next Saturday from today
+    const daysUntilSaturday = (6 - now.getDay() + 7) % 7; // Saturday is day 6
+    const endOfThisWeek = new Date(now);
+    if (daysUntilSaturday === 0) {
+      // If today is Saturday, end of this week is today
+      endOfThisWeek.setDate(now.getDate());
+    } else {
+      // Otherwise, end of this week is next Saturday
+      endOfThisWeek.setDate(now.getDate() + daysUntilSaturday);
+    }
+    endOfThisWeek.setHours(23, 59, 59, 999);
+    const endOfThisWeekStr = formatDate(endOfThisWeek);
+    
+    // Next Week: From Sunday after this week's Saturday onwards (7 days)
+    const startOfNextWeek = new Date(endOfThisWeek);
+    startOfNextWeek.setDate(endOfThisWeek.getDate() + 1); // Sunday
+    startOfNextWeek.setHours(0, 0, 0, 0);
+    const startOfNextWeekStr = formatDate(startOfNextWeek);
+    
+    // Next week ends on Saturday (7 days from start)
+    const endOfNextWeek = new Date(startOfNextWeek);
+    endOfNextWeek.setDate(startOfNextWeek.getDate() + 6); // +6 days = Saturday
+    endOfNextWeek.setHours(23, 59, 59, 999);
+    const endOfNextWeekStr = formatDate(endOfNextWeek);
 
-    // Helper to build query for a given week offset (0 = this week, 1 = next week)
-    const buildQuery = (weekOffset) => `
-      SELECT 
-        t.id,
-        t.name as title,
-        u.username as assignee,
-        t.status,
-        COALESCE(t.planned_hours, 0) AS estimated,
-        COALESCE(t.actual_hours, 0) AS logged
-      FROM tasks t
-      JOIN users u ON u.id = t.assignee_id
-      WHERE YEARWEEK(t.due_date, 1) = YEARWEEK(DATE_ADD(CURDATE(), INTERVAL ${weekOffset} WEEK), 1)
-      ${baseWhere}
-      ORDER BY t.due_date ASC, t.created_at DESC
-    `;
+    // Debug logging
+    console.log("Week boundaries calculated:", {
+      today: todayStr,
+      thisWeek: { start: todayStr, end: endOfThisWeekStr },
+      nextWeek: { start: startOfNextWeekStr, end: endOfNextWeekStr },
+      currentDayOfWeek: now.getDay(), // 0=Sunday, 6=Saturday
+    });
 
-    pool.execute(buildQuery(0), params, (err, thisRows) => {
+    // Helper for parametrized week query
+    const buildQuery = (weekStart, weekEnd, weekLabel) => {
+      const allParams = [...params, weekStart, weekEnd];
+      const dateField = "COALESCE(NULLIF(t.due_date, ''), t.created_at)";
+      let whereClause = `DATE(${dateField}) >= ? AND DATE(${dateField}) <= ?`;
+      
+      if (conditions.length > 0) {
+        whereClause += ' AND ' + conditions.join(' AND ');
+      }
+      
+      const query = `
+        SELECT 
+          t.id,
+          t.name as title,
+          u.username as assignee,
+          t.status,
+          COALESCE(t.planned_hours, 0) AS estimated,
+          COALESCE(t.actual_hours, 0) AS logged,
+          t.due_date,
+          t.created_at,
+          DATE(${dateField}) as task_date
+        FROM tasks t
+        JOIN users u ON u.id = t.assignee_id
+        ${joinClause}
+        WHERE ${whereClause}
+        ORDER BY COALESCE(NULLIF(t.due_date, ''), t.created_at) ASC, t.created_at DESC
+      `;
+      
+      console.log(`${weekLabel} query params:`, JSON.stringify(allParams));
+      console.log(`${weekLabel} date range:`, weekStart, 'to', weekEnd);
+      
+      return { query, params: allParams };
+    };
+
+    const thisWeekQuery = buildQuery(todayStr, endOfThisWeekStr, "This Week");
+    const nextWeekQuery = buildQuery(startOfNextWeekStr, endOfNextWeekStr, "Next Week");
+
+    pool.execute(thisWeekQuery.query, thisWeekQuery.params, (err, thisRows) => {
       if (err) {
         console.error("Tasks timeline (this week) error:", err);
         return res.status(500).json({ error: "Database error" });
       }
-      pool.execute(buildQuery(1), params, (err2, nextRows) => {
+      console.log("Tasks timeline (this week) results:", thisRows.length, "tasks");
+      if (thisRows.length > 0) {
+        console.log("Tasks this week:", thisRows.map(r => ({ 
+          id: r.id, 
+          title: r.title, 
+          task_date: r.task_date
+        })));
+      }
+      
+      pool.execute(nextWeekQuery.query, nextWeekQuery.params, (err2, nextRows) => {
         if (err2) {
           console.error("Tasks timeline (next week) error:", err2);
           return res.status(500).json({ error: "Database error" });
+        }
+        console.log("Tasks timeline (next week) results:", nextRows.length, "tasks");
+        if (nextRows.length > 0) {
+          console.log("Tasks next week:", nextRows.map(r => ({ 
+            id: r.id, 
+            title: r.title, 
+            task_date: r.task_date
+          })));
         }
 
         const mapRow = (row) => {
@@ -3728,10 +4310,66 @@ app.get("/api/dashboard/tasks-timeline", (req, res) => {
           };
         };
 
-        res.json({
-          thisWeek: thisRows.map(mapRow),
-          nextWeek: nextRows.map(mapRow),
-        });
+        let finalThisWeek = thisRows.map(mapRow);
+        let finalNextWeek = nextRows.map(mapRow);
+        
+        // Fallback logic if both weeks are empty
+        if (thisRows.length === 0 && nextRows.length === 0) {
+          console.log("Both weeks empty - fetching all active tasks as fallback...");
+          const fallbackQuery = `
+            SELECT 
+              t.id,
+              t.name as title,
+              u.username as assignee,
+              t.status,
+              COALESCE(t.planned_hours, 0) AS estimated,
+              COALESCE(t.actual_hours, 0) AS logged,
+              t.due_date,
+              t.created_at,
+              DATE(COALESCE(t.due_date, t.created_at)) as task_date
+            FROM tasks t
+            JOIN users u ON u.id = t.assignee_id
+            ${joinClause}
+            WHERE ${conditions.length > 0 ? conditions.join(' AND ') : '1=1'}
+              AND t.status != 'completed'
+            ORDER BY COALESCE(t.due_date, t.created_at) ASC, t.created_at DESC
+            LIMIT 20
+          `;
+          
+          pool.execute(fallbackQuery, params, (fallbackErr, fallbackRows) => {
+            if (!fallbackErr && fallbackRows.length > 0) {
+              console.log("Fallback: Found", fallbackRows.length, "active tasks");
+              finalThisWeek = [];
+              finalNextWeek = [];
+              
+              fallbackRows.forEach(row => {
+                const mapped = mapRow(row);
+                const taskDate = row.task_date ? String(row.task_date) : null;
+                
+                if (taskDate && taskDate <= endOfThisWeekStr) {
+                  finalThisWeek.push(mapped);
+                } else {
+                  finalNextWeek.push(mapped);
+                }
+              });
+              
+              if (finalThisWeek.length === 0 && finalNextWeek.length > 0) {
+                finalThisWeek = finalNextWeek;
+                finalNextWeek = [];
+              }
+            }
+            
+            res.json({
+              thisWeek: finalThisWeek,
+              nextWeek: finalNextWeek,
+            });
+          });
+        } else {
+          res.json({
+            thisWeek: finalThisWeek,
+            nextWeek: finalNextWeek,
+          });
+        }
       });
     });
   } catch (e) {

@@ -1,2 +1,15 @@
 # Node modules
 node_modules/
+
+# Database files
+*.db
+*.sqlite3
+*.sqlite
+
+# Environment variables
+.env
+.env.local
+
+# OS files
+__MACOSX/
+.DS_Store
