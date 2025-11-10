@@ -4558,14 +4558,20 @@ app.get("/api/dashboard/tasks-timeline", (req, res) => {
     });
 
     // Apply date filters to the query ONLY if dates are explicitly provided
-    // For superadmin with "all" filters (no project/employee filters), don't apply date filters - show all tasks
-    // This allows superadmin to see all tasks when filters are set to "all"
+    // For superadmin with "all" filters and managers, don't apply date filters - show all tasks
+    // This allows superadmin and managers to see all tasks from their assigned projects
     const isSuperAdminWithAllFilters = (normalizedRole === 'super_admin' || normalizedRole === 'superadmin') 
       && (!projectId || projectId === 'all') 
       && (!employeeId || employeeId === 'all');
     
-    if (!isSuperAdminWithAllFilters) {
-      // Apply date filters for non-superadmin or when specific filters are selected
+    const isManagerWithAllFilters = (normalizedRole === 'manager' || normalizedRole === 'team_lead')
+      && (!projectId || projectId === 'all')
+      && (!employeeId || employeeId === 'all');
+    
+    // Don't apply date filters for superadmin with "all" filters or managers with "all" filters
+    // This ensures they see all tasks from their assigned projects/projects
+    if (!isSuperAdminWithAllFilters && !isManagerWithAllFilters) {
+      // Apply date filters for employees or when specific filters are selected
       if (validatedStartDate) {
         conditions.push("DATE(COALESCE(NULLIF(t.due_date, ''), t.created_at)) >= DATE(?)");
         params.push(validatedStartDate);
@@ -4575,7 +4581,11 @@ app.get("/api/dashboard/tasks-timeline", (req, res) => {
         params.push(validatedEndDate);
       }
     } else {
-      console.log("Superadmin with 'all' filters: Ignoring date filters to show all tasks");
+      if (isSuperAdminWithAllFilters) {
+        console.log("Superadmin with 'all' filters: Ignoring date filters to show all tasks");
+      } else if (isManagerWithAllFilters) {
+        console.log(`Manager/Team Lead (userId: ${userId}) with 'all' filters: Ignoring date filters to show all tasks from assigned projects`);
+      }
     }
 
     const dateField = "COALESCE(NULLIF(t.due_date, ''), t.created_at)";
@@ -4713,36 +4723,99 @@ app.get("/api/dashboard/tasks-timeline", (req, res) => {
 
         // Categorize task based on actual calendar week boundaries
         // For superadmin with "all" filters and managers, show all tasks (categorize by their dates)
-        // For employees, only show tasks from "this week" and "next week"
+        // For employees, if a date range is selected, use that range; otherwise use calendar weeks
         const isManagerOrSuperAdmin = isSuperAdminWithAllFilters || (normalizedRole === 'manager' || normalizedRole === 'team_lead');
+        
+        // For employees with a selected date range, use the selected range boundaries instead of calendar weeks
+        let effectiveThisWeekStart = thisWeekStart;
+        let effectiveThisWeekEnd = thisWeekEnd;
+        let effectiveNextWeekStart = nextWeekStart;
+        let effectiveNextWeekEnd = nextWeekEnd;
+        
+        if (normalizedRole === 'employee' && validatedStartDate && validatedEndDate) {
+          // Employee has selected a date range - split it in half for "this week" and "next week"
+          const rangeStart = new Date(validatedStartDate);
+          rangeStart.setHours(0, 0, 0, 0);
+          const rangeEnd = new Date(validatedEndDate);
+          rangeEnd.setHours(23, 59, 59, 999);
+          
+          // Calculate midpoint of the date range
+          const rangeDuration = rangeEnd.getTime() - rangeStart.getTime();
+          const midpoint = new Date(rangeStart.getTime() + rangeDuration / 2);
+          midpoint.setHours(0, 0, 0, 0);
+          
+          // First half goes to "this week", second half goes to "next week"
+          effectiveThisWeekStart = rangeStart;
+          effectiveThisWeekEnd = new Date(midpoint);
+          effectiveThisWeekEnd.setHours(23, 59, 59, 999);
+          
+          effectiveNextWeekStart = new Date(midpoint);
+          effectiveNextWeekStart.setDate(midpoint.getDate() + 1);
+          effectiveNextWeekStart.setHours(0, 0, 0, 0);
+          effectiveNextWeekEnd = rangeEnd;
+          
+          console.log(`Employee with date range: Using selected range for categorization`, {
+            selectedRange: { start: validatedStartDate, end: validatedEndDate },
+            thisWeek: { start: formatDate(effectiveThisWeekStart), end: formatDate(effectiveThisWeekEnd) },
+            nextWeek: { start: formatDate(effectiveNextWeekStart), end: formatDate(effectiveNextWeekEnd) }
+          });
+        }
         
         if (taskDate) {
           const taskDateObj = new Date(taskDate);
           taskDateObj.setHours(0, 0, 0, 0); // Normalize to start of day for comparison
           
           // Compare dates (not times) for categorization
-          if (taskDateObj >= thisWeekStart && taskDateObj <= thisWeekEnd) {
+          if (taskDateObj >= effectiveThisWeekStart && taskDateObj <= effectiveThisWeekEnd) {
             thisWeekTasks.push(row);
-            console.log(`Task "${row.title}" categorized as THIS WEEK (date: ${taskDate}, range: ${thisWeekStartStr} to ${thisWeekEndStr})`);
-          } else if (taskDateObj >= nextWeekStart && taskDateObj <= nextWeekEnd) {
+            console.log(`Task "${row.title}" categorized as THIS WEEK (date: ${taskDate}, range: ${formatDate(effectiveThisWeekStart)} to ${formatDate(effectiveThisWeekEnd)})`);
+          } else if (taskDateObj >= effectiveNextWeekStart && taskDateObj <= effectiveNextWeekEnd) {
             // Task falls within next week boundaries
             nextWeekTasks.push(row);
-            console.log(`Task "${row.title}" categorized as NEXT WEEK (date: ${taskDate}, range: ${nextWeekStartStr} to ${nextWeekEndStr})`);
+            console.log(`Task "${row.title}" categorized as NEXT WEEK (date: ${taskDate}, range: ${formatDate(effectiveNextWeekStart)} to ${formatDate(effectiveNextWeekEnd)})`);
           } else if (isManagerOrSuperAdmin) {
             // For superadmin with "all" filters and managers, include tasks outside this week/next week
             // Categorize based on whether they're before this week (past) or after next week (future)
-            if (taskDateObj < thisWeekStart) {
+            if (taskDateObj < effectiveThisWeekStart) {
               // Past task - add to "this week" section for display
               thisWeekTasks.push(row);
-              console.log(`Task "${row.title}" categorized as PAST (date: ${taskDate} < ${thisWeekStartStr}) - added to thisWeek for ${isSuperAdminWithAllFilters ? 'superadmin' : 'manager'}`);
-            } else if (taskDateObj > nextWeekEnd) {
+              console.log(`Task "${row.title}" categorized as PAST (date: ${taskDate} < ${formatDate(effectiveThisWeekStart)}) - added to thisWeek for ${isSuperAdminWithAllFilters ? 'superadmin' : 'manager'}`);
+            } else if (taskDateObj > effectiveNextWeekEnd) {
               // Future task - add to "next week" section for display
               nextWeekTasks.push(row);
-              console.log(`Task "${row.title}" categorized as FUTURE (date: ${taskDate} > ${nextWeekEndStr}) - added to nextWeek for ${isSuperAdminWithAllFilters ? 'superadmin' : 'manager'}`);
+              console.log(`Task "${row.title}" categorized as FUTURE (date: ${taskDate} > ${formatDate(effectiveNextWeekEnd)}) - added to nextWeek for ${isSuperAdminWithAllFilters ? 'superadmin' : 'manager'}`);
+            }
+          } else if (normalizedRole === 'employee' && validatedStartDate && validatedEndDate) {
+            // For employees with a selected date range, include all tasks within the range
+            // Tasks outside the selected range should not appear (they were filtered by SQL)
+            // But if a task somehow got through, categorize it based on which half of the range it's in
+            if (taskDateObj < effectiveThisWeekStart) {
+              // Before range start - shouldn't happen due to SQL filter, but include in "this week" if it does
+              thisWeekTasks.push(row);
+              console.log(`Task "${row.title}" categorized as BEFORE RANGE (date: ${taskDate}) - added to thisWeek`);
+            } else if (taskDateObj > effectiveNextWeekEnd) {
+              // After range end - shouldn't happen due to SQL filter, but include in "next week" if it does
+              nextWeekTasks.push(row);
+              console.log(`Task "${row.title}" categorized as AFTER RANGE (date: ${taskDate}) - added to nextWeek`);
+            } else {
+              // Task is within range but not in either half - split at midpoint
+              const rangeStart = new Date(validatedStartDate);
+              rangeStart.setHours(0, 0, 0, 0);
+              const rangeEnd = new Date(validatedEndDate);
+              rangeEnd.setHours(23, 59, 59, 999);
+              const rangeDuration = rangeEnd.getTime() - rangeStart.getTime();
+              const midpoint = new Date(rangeStart.getTime() + rangeDuration / 2);
+              
+              if (taskDateObj <= midpoint) {
+                thisWeekTasks.push(row);
+                console.log(`Task "${row.title}" categorized as FIRST HALF (date: ${taskDate}) - added to thisWeek`);
+              } else {
+                nextWeekTasks.push(row);
+                console.log(`Task "${row.title}" categorized as SECOND HALF (date: ${taskDate}) - added to nextWeek`);
+              }
             }
           } else {
-            // Task is outside "this week" and "next week" - don't include in timeline
-            // (This is expected for employees - "Tasks This Week" and "Tasks Next Week" only show tasks from those specific weeks)
+            // Employee without date range - task is outside calendar "this week" and "next week" - don't include
             console.log(`Task "${row.title}" NOT categorized (date: ${taskDate} is outside thisWeek/nextWeek boundaries)`);
           }
         } else {
@@ -4750,6 +4823,10 @@ app.get("/api/dashboard/tasks-timeline", (req, res) => {
           if (isManagerOrSuperAdmin) {
             thisWeekTasks.push(row);
             console.log(`Task "${row.title}" has no valid date - added to thisWeek for ${isSuperAdminWithAllFilters ? 'superadmin' : 'manager'}`);
+          } else if (normalizedRole === 'employee' && validatedStartDate && validatedEndDate) {
+            // For employees with date range, include tasks without dates in "this week"
+            thisWeekTasks.push(row);
+            console.log(`Task "${row.title}" has no valid date - added to thisWeek for employee with date range`);
           } else {
             console.log(`Task "${row.title}" has no valid date, skipping`);
           }
