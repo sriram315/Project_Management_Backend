@@ -3374,7 +3374,40 @@ function generateWeekRange(start, end) {
 
 app.get("/api/dashboard/data", (req, res) => {
   try {
-    const { projectId, employeeId, startDate, endDate, userId, userRole } = req.query;
+    let { projectId, employeeId, startDate, endDate, userId, userRole } = req.query;
+
+    // Validate and normalize dates
+    const validateDate = (dateStr) => {
+      if (!dateStr) return null;
+      // Check if date string is in valid format (YYYY-MM-DD)
+      const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
+      if (!dateRegex.test(String(dateStr))) return null;
+      
+      const date = new Date(dateStr);
+      // Check if date is valid
+      if (isNaN(date.getTime())) return null;
+      return String(dateStr);
+    };
+
+    // Validate dates
+    let validatedStartDate = validateDate(startDate);
+    let validatedEndDate = validateDate(endDate);
+
+    // If both dates are provided, validate that start <= end
+    if (validatedStartDate && validatedEndDate) {
+      const start = new Date(validatedStartDate);
+      const end = new Date(validatedEndDate);
+      if (start > end) {
+        // Invalid range: ignore both dates or swap them
+        console.warn('Invalid date range: start date is after end date. Ignoring date filters.');
+        validatedStartDate = null;
+        validatedEndDate = null;
+      }
+    }
+
+    // Use validated dates
+    startDate = validatedStartDate;
+    endDate = validatedEndDate;
 
     console.log("Dashboard data request:", {
       projectId,
@@ -3482,12 +3515,16 @@ app.get("/api/dashboard/data", (req, res) => {
       const dateQueryParams = [...queryParams];
       
       if (startDate) {
-        dateWhereConditions.push("DATE(COALESCE(t.due_date, t.created_at)) >= ?");
+        // Handle empty strings and NULL for due_date
+        // Use STR_TO_DATE to ensure proper date comparison
+        dateWhereConditions.push("DATE(COALESCE(NULLIF(t.due_date, ''), t.created_at)) >= STR_TO_DATE(?, '%Y-%m-%d')");
         dateQueryParams.push(startDate);
       }
 
       if (endDate) {
-        dateWhereConditions.push("DATE(COALESCE(t.due_date, t.created_at)) <= ?");
+        // Handle empty strings and NULL for due_date
+        // Use STR_TO_DATE to ensure proper date comparison
+        dateWhereConditions.push("DATE(COALESCE(NULLIF(t.due_date, ''), t.created_at)) <= STR_TO_DATE(?, '%Y-%m-%d')");
         dateQueryParams.push(endDate);
       }
 
@@ -3495,62 +3532,75 @@ app.get("/api/dashboard/data", (req, res) => {
         ? `WHERE ${dateWhereConditions.join(" AND ")}`
         : "";
 
-      // Use base WHERE clause (without date filter) for productivity/utilization
-      // This ensures all tasks are included in calculations
-      const whereClause = baseWhereClause;
+      // Use date-filtered WHERE clause for productivity/utilization/availability
+      // Apply date filters when dates are provided
+      const whereClause = (startDate || endDate) ? dateFilteredWhereClause : baseWhereClause;
+      const finalQueryParams = (startDate || endDate) ? dateQueryParams : queryParams;
 
       // ========== UTILIZATION QUERY ==========
-      // Utilization = (Planned / Available) × 100
-      // Planned = SUM(planned_hours) for all tasks
+      // Utilization = (Actual Hours / Available Hours) × 100
+      // For completed tasks: use actual_hours (if > 0)
+      // For incomplete tasks: use planned_hours as estimate
       // Available = SUM(available_hours_per_week) for relevant users
       const utilizationQuery = `
         SELECT 
           week,
+          SUM(COALESCE(NULLIF(actual_hours, 0), planned_hours)) as actual_working_hours,
           SUM(planned_hours) as planned_working_hours,
           SUM(available_hours) as total_available_hours,
-          ROUND((SUM(planned_hours) / NULLIF(SUM(available_hours), 0)) * 100, 1) as utilization_percentage
+          ROUND((SUM(COALESCE(NULLIF(actual_hours, 0), planned_hours)) / NULLIF(SUM(available_hours), 0)) * 100, 1) as utilization_percentage
         FROM (
           SELECT 
-            DATE_FORMAT(COALESCE(t.due_date, t.created_at), '%Y-W%u') as week,
+            DATE_FORMAT(COALESCE(NULLIF(t.due_date, ''), t.created_at), '%Y-W%u') as week,
             t.assignee_id,
+            SUM(COALESCE(t.actual_hours, 0)) as actual_hours,
             SUM(COALESCE(t.planned_hours, 0)) as planned_hours,
             MAX(COALESCE(u.available_hours_per_week, 40)) as available_hours
           FROM tasks t
           JOIN users u ON t.assignee_id = u.id
           ${joinClause}
           ${whereClause}
-          GROUP BY DATE_FORMAT(COALESCE(t.due_date, t.created_at), '%Y-W%u'), t.assignee_id
+          GROUP BY DATE_FORMAT(COALESCE(NULLIF(t.due_date, ''), t.created_at), '%Y-W%u'), t.assignee_id
         ) as weekly_utilization
         GROUP BY week
         ORDER BY week ASC
       `;
 
       // ========== PRODUCTIVITY QUERY ==========
-      // Productivity = (Actual / Planned) × 100
-      // Actual = SUM(actual_hours)
-      // Planned = SUM(planned_hours)
+      // Productivity = (Planned / Actual) × 100
+      // Only calculate productivity for completed tasks (status = 'completed')
+      // For in-progress or incomplete tasks, productivity should be NULL
+      // If actual < planned, productivity > 100% (more efficient)
+      // If actual > planned, productivity < 100% (less efficient)
       const productivityQuery = `
         SELECT 
-          DATE_FORMAT(COALESCE(t.due_date, t.created_at), '%Y-W%u') as week,
+          DATE_FORMAT(COALESCE(NULLIF(t.due_date, ''), t.created_at), '%Y-W%u') as week,
           COUNT(*) as total_tasks,
           COUNT(CASE WHEN t.status = 'completed' THEN 1 END) as completed_tasks,
           SUM(COALESCE(t.actual_hours, 0)) as actual_hours,
           SUM(COALESCE(t.planned_hours, 0)) as planned_hours,
+          -- Hours from completed tasks only (for accurate productivity calculation)
+          SUM(CASE WHEN t.status = 'completed' THEN COALESCE(t.actual_hours, 0) ELSE 0 END) as completed_actual_hours,
+          SUM(CASE WHEN t.status = 'completed' THEN COALESCE(t.planned_hours, 0) ELSE 0 END) as completed_planned_hours,
+          -- Only calculate productivity for completed tasks
           CASE 
-            WHEN SUM(COALESCE(t.planned_hours, 0)) > 0 
-            THEN ROUND((SUM(COALESCE(t.actual_hours, 0)) / NULLIF(SUM(COALESCE(t.planned_hours, 0)), 0)) * 100, 1)
+            WHEN SUM(CASE WHEN t.status = 'completed' THEN COALESCE(t.actual_hours, 0) ELSE 0 END) > 0 
+            THEN ROUND((
+              SUM(CASE WHEN t.status = 'completed' THEN COALESCE(t.planned_hours, 0) ELSE 0 END) / 
+              NULLIF(SUM(CASE WHEN t.status = 'completed' THEN COALESCE(t.actual_hours, 0) ELSE 0 END), 0)
+            ) * 100, 1)
             ELSE NULL
           END as productivity
         FROM tasks t
         JOIN users u ON t.assignee_id = u.id
         ${joinClause}
         ${whereClause}
-        GROUP BY DATE_FORMAT(COALESCE(t.due_date, t.created_at), '%Y-W%u')
+        GROUP BY DATE_FORMAT(COALESCE(NULLIF(t.due_date, ''), t.created_at), '%Y-W%u')
         ORDER BY week ASC
       `;
 
       // ========== AVAILABILITY QUERY ==========
-      // Team Availability = Available Hours - Planned Hours per week
+      // Team Availability = Available Hours - Actual Hours per week
       // Positive = available hours, Negative = overutilized
       let totalAvailableQuery = "";
       let totalAvailableParams = [];
@@ -3607,15 +3657,16 @@ app.get("/api/dashboard/data", (req, res) => {
       const availabilityQuery = `
         SELECT 
           week,
-          COALESCE(?, 0) - COALESCE(SUM(total_planned_hours), 0) as available_hours
+          COALESCE(?, 0) - COALESCE(SUM(COALESCE(NULLIF(total_actual_hours, 0), total_planned_hours)), 0) as available_hours
         FROM (
           SELECT 
-            DATE_FORMAT(COALESCE(t.due_date, t.created_at), '%Y-W%u') as week,
+            DATE_FORMAT(COALESCE(NULLIF(t.due_date, ''), t.created_at), '%Y-W%u') as week,
+            SUM(COALESCE(t.actual_hours, 0)) as total_actual_hours,
             SUM(COALESCE(t.planned_hours, 0)) as total_planned_hours
           FROM tasks t
           ${joinClause}
           ${whereClause}
-          GROUP BY DATE_FORMAT(COALESCE(t.due_date, t.created_at), '%Y-W%u')
+          GROUP BY DATE_FORMAT(COALESCE(NULLIF(t.due_date, ''), t.created_at), '%Y-W%u')
         ) as availability_calc
         GROUP BY week
         ORDER BY week ASC
@@ -3666,14 +3717,14 @@ app.get("/api/dashboard/data", (req, res) => {
         }
       });
 
-      // Execute queries - use base query params (without date filter) for metrics
-      pool.execute(utilizationQuery, queryParams, (err, utilizationRows) => {
+      // Execute queries - use date-filtered params when dates are provided
+      pool.execute(utilizationQuery, finalQueryParams, (err, utilizationRows) => {
         if (err) {
           console.error("Utilization query error:", err);
           return res.status(500).json({ error: "Database error", details: err.message });
         }
 
-        pool.execute(productivityQuery, queryParams, (err, productivityRows) => {
+        pool.execute(productivityQuery, finalQueryParams, (err, productivityRows) => {
           if (err) {
             console.error("Productivity query error:", err);
             return res.status(500).json({ error: "Database error", details: err.message });
@@ -3686,7 +3737,7 @@ app.get("/api/dashboard/data", (req, res) => {
             }
 
             const totalAvailableHours = parseFloat(totalAvailableRows[0]?.total) || 0;
-            const availabilityParams = [totalAvailableHours, ...queryParams];
+            const availabilityParams = [totalAvailableHours, ...finalQueryParams];
 
             pool.execute(availabilityQuery, availabilityParams, (err, availabilityRows) => {
               if (err) {
@@ -3696,12 +3747,20 @@ app.get("/api/dashboard/data", (req, res) => {
 
               // Debug logging
               console.log("=== DASHBOARD DATA DEBUG ===");
-              console.log("Utilization rows:", JSON.stringify(utilizationRows, null, 2));
-              console.log("Productivity rows:", JSON.stringify(productivityRows, null, 2));
               console.log("Where clause:", whereClause);
+              console.log("Final query params:", finalQueryParams);
               console.log("Date query params:", dateQueryParams);
-              console.log("Join clause:", joinClause);
+              console.log("Base query params:", queryParams);
               console.log("Filters - projectId:", projectId, "employeeId:", employeeId, "startDate:", startDate, "endDate:", endDate);
+              console.log("Utilization rows count:", utilizationRows.length);
+              console.log("Productivity rows count:", productivityRows.length);
+              console.log("Availability rows count:", availabilityRows.length);
+              if (utilizationRows.length > 0) {
+                console.log("Sample utilization weeks:", utilizationRows.slice(0, 3).map(r => r.week));
+              }
+              if (productivityRows.length > 0) {
+                console.log("Sample productivity weeks:", productivityRows.slice(0, 3).map(r => r.week));
+              }
 
               // Format data
               const utilizationData = utilizationRows.map((row) => {
@@ -3711,14 +3770,17 @@ app.get("/api/dashboard/data", (req, res) => {
                 return {
                   week: row.week,
                   utilization: (utilPercent !== null && !isNaN(utilPercent)) ? utilPercent : null,
-                  actualHours: parseFloat(row.planned_working_hours) || 0, // This is actually planned hours for utilization
+                  actualHours: parseFloat(row.actual_working_hours) || 0, // Actual hours worked
+                  plannedHours: parseFloat(row.planned_working_hours) || 0, // Planned hours
                   availableHours: parseFloat(row.total_available_hours) || 0,
                 };
               });
 
               const productivityData = productivityRows.map((row) => {
-                // Productivity = (Actual / Planned) × 100
-                // Use hours-based productivity: (actual_hours / planned_hours) × 100
+                // Productivity = (Planned / Actual) × 100
+                // If actual < planned, productivity > 100% (more efficient)
+                // Use hours-based productivity: (planned_hours / actual_hours) × 100
+                // Only calculated for completed tasks
                 const productivity = row.productivity !== null && row.productivity !== undefined 
                   ? parseFloat(row.productivity) 
                   : null;
@@ -3727,8 +3789,10 @@ app.get("/api/dashboard/data", (req, res) => {
                   week: row.week,
                   completed: parseInt(row.completed_tasks) || 0,
                   total: parseInt(row.total_tasks) || 0,
-                  hours: parseFloat(row.actual_hours) || 0,
-                  plannedHours: parseFloat(row.planned_hours) || 0,
+                  hours: parseFloat(row.actual_hours) || 0, // All tasks actual hours
+                  plannedHours: parseFloat(row.planned_hours) || 0, // All tasks planned hours
+                  completedActualHours: parseFloat(row.completed_actual_hours) || 0, // Only completed tasks
+                  completedPlannedHours: parseFloat(row.completed_planned_hours) || 0, // Only completed tasks
                   productivity: (productivity !== null && !isNaN(productivity) && productivity >= 0) ? productivity : null,
                 };
               });
@@ -3738,26 +3802,63 @@ app.get("/api/dashboard/data", (req, res) => {
                 availableHours: parseFloat(row.available_hours) || 0,
               }));
 
-              // Generate all weeks - use data from queries, not date range
-              // This ensures we show all weeks where tasks exist
-              const allWeeks = Array.from(new Set([
+              // Generate all weeks - filter by date range if dates are provided
+              let allWeeks = Array.from(new Set([
                 ...utilizationData.map((d) => d.week),
                 ...productivityData.map((d) => d.week),
                 ...availabilityData.map((d) => d.week),
               ]));
 
+              // If date range is provided, filter weeks to only include those within the range
+              if (startDate && endDate) {
+                const startDateObj = new Date(startDate);
+                const endDateObj = new Date(endDate);
+                
+                // Helper function to check if a week falls within the date range
+                const isWeekInRange = (weekStr) => {
+                  // Parse week string (e.g., "2025-W46")
+                  const match = weekStr.match(/(\d{4})-W(\d{2})/);
+                  if (!match) return false;
+                  
+                  const year = parseInt(match[1]);
+                  const weekNum = parseInt(match[2]);
+                  
+                  // Get the Monday of the specified week
+                  const jan4 = new Date(year, 0, 4);
+                  const jan4Day = jan4.getDay() || 7;
+                  const mondayOfWeek1 = new Date(jan4);
+                  mondayOfWeek1.setDate(jan4.getDate() - jan4Day + 1);
+                  
+                  const mondayOfTargetWeek = new Date(mondayOfWeek1);
+                  mondayOfTargetWeek.setDate(mondayOfWeek1.getDate() + (weekNum - 1) * 7);
+                  
+                  const sundayOfTargetWeek = new Date(mondayOfTargetWeek);
+                  sundayOfTargetWeek.setDate(mondayOfTargetWeek.getDate() + 6);
+                  
+                  // Check if the week overlaps with the date range
+                  return (mondayOfTargetWeek <= endDateObj && sundayOfTargetWeek >= startDateObj);
+                };
+                
+                allWeeks = allWeeks.filter(isWeekInRange);
+              }
+
               if (allWeeks.length === 0) {
-                // If no data, show current week
-                const now = new Date();
-                const year = now.getFullYear();
-                const week = getWeekNumber(now);
-                allWeeks.push(`${year}-W${week.toString().padStart(2, "0")}`);
+                // If no data, show current week or generate weeks from date range
+                if (startDate && endDate) {
+                  allWeeks = generateWeekRange(startDate, endDate);
+                } else {
+                  const now = new Date();
+                  const year = now.getFullYear();
+                  const week = getWeekNumber(now);
+                  allWeeks.push(`${year}-W${week.toString().padStart(2, "0")}`);
+                }
               }
 
               // Calculate total available hours from utilization data (for fallback and overall calculation)
-              // Use the totalAvailableHours from the database query (line 3688) as the default per-week value
+              // Use the totalAvailableHours from the database query (line 3722) as the default per-week value
               // If no utilization data, use the total from the query divided by number of weeks, or 0
               const calculatedTotalAvailableHours = utilizationData.reduce((sum, d) => sum + (d.availableHours || 0), 0);
+              const calculatedTotalActualHours = utilizationData.reduce((sum, d) => sum + (d.actualHours || 0), 0);
               const defaultAvailableHoursPerWeek = allWeeks.length > 0 && calculatedTotalAvailableHours === 0 
                 ? (totalAvailableHours / allWeeks.length) 
                 : (calculatedTotalAvailableHours / Math.max(allWeeks.length, 1));
@@ -3791,23 +3892,33 @@ app.get("/api/dashboard/data", (req, res) => {
               });
 
               // Calculate overall productivity and utilization (aggregated across all weeks)
-              // Productivity = (Actual / Planned) × 100
+              // Productivity = (Planned / Actual) × 100
+              // Only calculate for completed tasks - use completed task hours only
+              const totalCompletedActualHours = productivityData.reduce((sum, d) => sum + (d.completedActualHours || 0), 0);
+              const totalCompletedPlannedHours = productivityData.reduce((sum, d) => sum + (d.completedPlannedHours || 0), 0);
+              // Only calculate productivity if we have completed tasks with actual hours
+              const overallProductivity = totalCompletedActualHours > 0 ? (totalCompletedPlannedHours / totalCompletedActualHours) * 100 : null;
+              
+              // For utilization, use all tasks (completed and in-progress)
               const totalActualHours = productivityData.reduce((sum, d) => sum + (d.hours || 0), 0);
               const totalPlannedHours = productivityData.reduce((sum, d) => sum + (d.plannedHours || 0), 0);
-              const overallProductivity = totalPlannedHours > 0 ? (totalActualHours / totalPlannedHours) * 100 : 0;
               
-              // Utilization = (Planned / Available) × 100
+              // Utilization = (Actual / Available) × 100
+              // Use actual hours from utilization data (which uses actual if available, else planned)
               // Use calculatedTotalAvailableHours if available, otherwise use totalAvailableHours from query
               const totalAvailableHoursForUtilization = calculatedTotalAvailableHours > 0 
                 ? calculatedTotalAvailableHours 
                 : totalAvailableHours;
+              const totalActualHoursForUtilization = calculatedTotalActualHours > 0
+                ? calculatedTotalActualHours
+                : totalActualHours;
               const overallUtilization = totalAvailableHoursForUtilization > 0 
-                ? (totalPlannedHours / totalAvailableHoursForUtilization) * 100 
+                ? (totalActualHoursForUtilization / totalAvailableHoursForUtilization) * 100 
                 : 0;
 
               console.log("=== FINAL MERGED DATA ===");
-              console.log(`Overall Productivity: ${overallProductivity.toFixed(1)}% (${totalActualHours.toFixed(1)}h actual / ${totalPlannedHours.toFixed(1)}h planned)`);
-              console.log(`Overall Utilization: ${overallUtilization.toFixed(1)}% (${totalPlannedHours.toFixed(1)}h planned / ${totalAvailableHoursForUtilization.toFixed(1)}h available)`);
+              console.log(`Overall Productivity: ${overallProductivity !== null ? overallProductivity.toFixed(1) + '%' : 'N/A (no completed tasks)'} (${totalCompletedPlannedHours.toFixed(1)}h planned / ${totalCompletedActualHours.toFixed(1)}h actual - completed tasks only)`);
+              console.log(`Overall Utilization: ${overallUtilization.toFixed(1)}% (${totalActualHoursForUtilization.toFixed(1)}h actual / ${totalAvailableHoursForUtilization.toFixed(1)}h available)`);
               console.log(`Total Weeks: ${mergedData.length}`);
               if (mergedData.length > 0) {
                 console.log("Sample merged data (first week):", JSON.stringify(mergedData[0], null, 2));
@@ -4151,12 +4262,12 @@ app.get("/api/dashboard/task-status", (req, res) => {
 
     // Filter by date using COALESCE(due_date, created_at) to include tasks without due_date
     if (startDate) {
-      whereConditions.push("DATE(COALESCE(t.due_date, t.created_at)) >= ?");
+      whereConditions.push("DATE(COALESCE(NULLIF(t.due_date, ''), t.created_at)) >= DATE(?)");
       queryParams.push(startDate);
     }
 
     if (endDate) {
-      whereConditions.push("DATE(COALESCE(t.due_date, t.created_at)) <= ?");
+      whereConditions.push("DATE(COALESCE(NULLIF(t.due_date, ''), t.created_at)) <= DATE(?)");
       queryParams.push(endDate);
     }
 
@@ -4260,21 +4371,132 @@ app.get("/api/dashboard/task-status", (req, res) => {
 // Role-aware tasks timeline for dashboard (this week and next week)
 app.get("/api/dashboard/tasks-timeline", (req, res) => {
   try {
-    const { role, userId, projectId, employeeId } = req.query;
+    const { role, userId, projectId, employeeId, startDate, endDate } = req.query;
+
+    // Validate and normalize dates
+    const validateDate = (dateStr) => {
+      if (!dateStr) return null;
+      const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
+      if (!dateRegex.test(String(dateStr))) return null;
+      const date = new Date(dateStr);
+      if (isNaN(date.getTime())) return null;
+      return String(dateStr);
+    };
+
+    let validatedStartDate = validateDate(startDate);
+    let validatedEndDate = validateDate(endDate);
+
+    // If both dates are provided, validate that start <= end
+    if (validatedStartDate && validatedEndDate) {
+      const start = new Date(validatedStartDate);
+      const end = new Date(validatedEndDate);
+      if (start > end) {
+        console.warn('Invalid date range: start date is after end date. Ignoring date filters.');
+        validatedStartDate = null;
+        validatedEndDate = null;
+      }
+    }
 
     // Base conditions
     const conditions = [];
     const params = [];
     let joinClause = "";
 
-    // If manager/team_lead, always filter by their assigned projects
-    if (userId && role && (role === 'manager' || role === 'team_lead')) {
-      conditions.push("t.project_id IN (SELECT project_id FROM project_assignments WHERE assigned_to_user_id = ?)");
-      params.push(userId);
+    // Normalize role for comparison
+    const normalizedRole = role ? String(role).toLowerCase() : null;
+    
+    console.log("Tasks timeline request:", {
+      role: role,
+      normalizedRole: normalizedRole,
+      userId: userId,
+      projectId: projectId || 'all',
+      employeeId: employeeId || 'all',
+      startDate: startDate || 'none',
+      endDate: endDate || 'none'
+    });
+
+    // Role-based filtering:
+    // - Superadmin: No role-based restrictions (can see all tasks)
+    // - Manager/Team Lead: Filter by assigned projects
+    // - Employee: Filter by own tasks (unless employeeId is explicitly provided)
+    
+    // Track if manager filter is already added (to avoid duplication when projectId is also selected)
+    let managerFilterAdded = false;
+    
+    if (normalizedRole === 'manager' || normalizedRole === 'team_lead') {
+      // Manager/Team Lead: filter by their assigned projects
+      // Only add this filter if projectId is NOT selected (if projectId is selected, we'll add it later with the projectId filter)
+      if (userId && (!projectId || projectId === 'all')) {
+        conditions.push("t.project_id IN (SELECT project_id FROM project_assignments WHERE assigned_to_user_id = ?)");
+        params.push(userId);
+        managerFilterAdded = true;
+        console.log(`Manager/Team Lead filtering: userId=${userId}, filtering by assigned projects (no projectId filter)`);
+      } else if (userId) {
+        console.log(`Manager/Team Lead: userId=${userId}, projectId filter will be combined with assigned projects filter`);
+      }
+    } else if (normalizedRole === 'employee') {
+      // Employee: only see own tasks unless employeeId filter is explicitly provided
+      if (employeeId && employeeId !== "all") {
+        // EmployeeId filter is provided - use it
+        const employeeIds = String(employeeId).split(',').map(id => id.trim()).filter(id => id);
+        if (employeeIds.length > 0) {
+          if (employeeIds.length === 1) {
+            conditions.push("t.assignee_id = ?");
+            params.push(employeeIds[0]);
+          } else {
+            const placeholders = employeeIds.map(() => '?').join(',');
+            conditions.push(`t.assignee_id IN (${placeholders})`);
+            params.push(...employeeIds);
+          }
+        }
+      } else if (userId) {
+        // No employeeId filter - show only own tasks
+        conditions.push("t.assignee_id = ?");
+        params.push(userId);
+      }
+    }
+    // For superadmin (or any other role), no role-based restrictions are added
+
+    // Handle projectId filter (applies to all roles including superadmin)
+    // Only filter if projectId is explicitly provided and not "all"
+    // For managers, the projectId filter should be combined with their assigned projects
+    if (projectId && projectId !== "all") {
+      const projectIds = String(projectId).split(',').map(id => id.trim()).filter(id => id);
+      if (projectIds.length > 0) {
+        if (normalizedRole === 'manager' || normalizedRole === 'team_lead') {
+          // For managers, ensure the selected projects are within their assigned projects
+          // This creates an AND condition: project must be in assigned projects AND in selected projects
+          if (projectIds.length === 1) {
+            conditions.push("t.project_id = ?");
+            params.push(projectIds[0]);
+          } else {
+            const placeholders = projectIds.map(() => '?').join(',');
+            conditions.push(`t.project_id IN (${placeholders})`);
+            params.push(...projectIds);
+          }
+          // Add manager's assigned projects filter (if not already added)
+          if (!managerFilterAdded && userId) {
+            conditions.push("t.project_id IN (SELECT project_id FROM project_assignments WHERE assigned_to_user_id = ?)");
+            params.push(userId);
+            console.log(`Manager/Team Lead: Added assigned projects filter with projectId filter`);
+          }
+        } else {
+          // For non-managers, just filter by projectId
+          if (projectIds.length === 1) {
+            conditions.push("t.project_id = ?");
+            params.push(projectIds[0]);
+          } else {
+            const placeholders = projectIds.map(() => '?').join(',');
+            conditions.push(`t.project_id IN (${placeholders})`);
+            params.push(...projectIds);
+          }
+        }
+      }
     }
 
-    // Role restriction: employees only see own tasks unless employeeId provided
-    if (employeeId && employeeId !== "all") {
+    // Handle employeeId filter (for non-employee roles like superadmin and managers)
+    // Only filter if employeeId is explicitly provided and not "all"
+    if (normalizedRole !== 'employee' && employeeId && employeeId !== "all") {
       const employeeIds = String(employeeId).split(',').map(id => id.trim()).filter(id => id);
       if (employeeIds.length > 0) {
         if (employeeIds.length === 1) {
@@ -4284,24 +4506,6 @@ app.get("/api/dashboard/tasks-timeline", (req, res) => {
           const placeholders = employeeIds.map(() => '?').join(',');
           conditions.push(`t.assignee_id IN (${placeholders})`);
           params.push(...employeeIds);
-        }
-      }
-    } else if (role === "employee") {
-      conditions.push("t.assignee_id = ?");
-      params.push(userId);
-    }
-
-    // Handle multiple projectIds
-    if (projectId && projectId !== "all") {
-      const projectIds = String(projectId).split(',').map(id => id.trim()).filter(id => id);
-      if (projectIds.length > 0) {
-        if (projectIds.length === 1) {
-          conditions.push("t.project_id = ?");
-          params.push(projectIds[0]);
-        } else {
-          const placeholders = projectIds.map(() => '?').join(',');
-          conditions.push(`t.project_id IN (${placeholders})`);
-          params.push(...projectIds);
         }
       }
     }
@@ -4314,52 +4518,68 @@ app.get("/api/dashboard/tasks-timeline", (req, res) => {
       return `${year}-${month}-${day}`;
     }
     
-    // Calculate week boundaries based on current date
+    // Calculate "this week" and "next week" boundaries based on ACTUAL CALENDAR WEEKS
+    // This ensures tasks are always categorized correctly regardless of selected date range
     const now = new Date();
-    now.setHours(0, 0, 0, 0); // Reset to start of day
+    now.setHours(0, 0, 0, 0);
+    const dayOfWeek = now.getDay(); // 0 = Sunday, 1 = Monday, ..., 6 = Saturday
+    const diffToMonday = (dayOfWeek === 0 ? -6 : 1 - dayOfWeek);
     
-    // This Week: From today up to and including next Saturday
-    const todayStr = formatDate(now);
+    // This Week: Monday to Sunday of current week
+    const thisWeekStart = new Date(now);
+    thisWeekStart.setDate(now.getDate() + diffToMonday);
+    thisWeekStart.setHours(0, 0, 0, 0);
     
-    // Calculate next Saturday from today
-    const daysUntilSaturday = (6 - now.getDay() + 7) % 7; // Saturday is day 6
-    const endOfThisWeek = new Date(now);
-    if (daysUntilSaturday === 0) {
-      // If today is Saturday, end of this week is today
-      endOfThisWeek.setDate(now.getDate());
-    } else {
-      // Otherwise, end of this week is next Saturday
-      endOfThisWeek.setDate(now.getDate() + daysUntilSaturday);
-    }
-    endOfThisWeek.setHours(23, 59, 59, 999);
-    const endOfThisWeekStr = formatDate(endOfThisWeek);
+    const thisWeekEnd = new Date(thisWeekStart);
+    thisWeekEnd.setDate(thisWeekStart.getDate() + 6); // Sunday
+    thisWeekEnd.setHours(23, 59, 59, 999);
     
-    // Next Week: From Sunday after this week's Saturday onwards (7 days)
-    const startOfNextWeek = new Date(endOfThisWeek);
-    startOfNextWeek.setDate(endOfThisWeek.getDate() + 1); // Sunday
-    startOfNextWeek.setHours(0, 0, 0, 0);
-    const startOfNextWeekStr = formatDate(startOfNextWeek);
+    const thisWeekStartStr = formatDate(thisWeekStart);
+    const thisWeekEndStr = formatDate(thisWeekEnd);
     
-    // Next week ends on Saturday (7 days from start)
-    const endOfNextWeek = new Date(startOfNextWeek);
-    endOfNextWeek.setDate(startOfNextWeek.getDate() + 6); // +6 days = Saturday
-    endOfNextWeek.setHours(23, 59, 59, 999);
-    const endOfNextWeekStr = formatDate(endOfNextWeek);
+    // Next Week: Monday to Sunday of next week
+    const nextWeekStart = new Date(thisWeekEnd);
+    nextWeekStart.setDate(thisWeekEnd.getDate() + 1); // Monday
+    nextWeekStart.setHours(0, 0, 0, 0);
+    
+    const nextWeekEnd = new Date(nextWeekStart);
+    nextWeekEnd.setDate(nextWeekStart.getDate() + 6); // Sunday
+    nextWeekEnd.setHours(23, 59, 59, 999);
+    
+    const nextWeekStartStr = formatDate(nextWeekStart);
+    const nextWeekEndStr = formatDate(nextWeekEnd);
 
     // Debug logging
-    console.log("Week boundaries calculated:", {
-      today: todayStr,
-      thisWeek: { start: todayStr, end: endOfThisWeekStr },
-      nextWeek: { start: startOfNextWeekStr, end: endOfNextWeekStr },
-      currentDayOfWeek: now.getDay(), // 0=Sunday, 6=Saturday
+    console.log("Week boundaries calculated (based on actual calendar weeks):", {
+      today: formatDate(now),
+      thisWeek: { start: thisWeekStartStr, end: thisWeekEndStr },
+      nextWeek: { start: nextWeekStartStr, end: nextWeekEndStr },
+      selectedDateRange: { start: validatedStartDate || 'none', end: validatedEndDate || 'none' }
     });
 
-    // FIXED: Fetch ALL tasks first (no date filter), then categorize by week
-    // This ensures all tasks are visible, not just those in current/next week
+    // Apply date filters to the query ONLY if dates are explicitly provided
+    // For superadmin with "all" filters (no project/employee filters), don't apply date filters - show all tasks
+    // This allows superadmin to see all tasks when filters are set to "all"
+    const isSuperAdminWithAllFilters = (normalizedRole === 'super_admin' || normalizedRole === 'superadmin') 
+      && (!projectId || projectId === 'all') 
+      && (!employeeId || employeeId === 'all');
+    
+    if (!isSuperAdminWithAllFilters) {
+      // Apply date filters for non-superadmin or when specific filters are selected
+      if (validatedStartDate) {
+        conditions.push("DATE(COALESCE(NULLIF(t.due_date, ''), t.created_at)) >= DATE(?)");
+        params.push(validatedStartDate);
+      }
+      if (validatedEndDate) {
+        conditions.push("DATE(COALESCE(NULLIF(t.due_date, ''), t.created_at)) <= DATE(?)");
+        params.push(validatedEndDate);
+      }
+    } else {
+      console.log("Superadmin with 'all' filters: Ignoring date filters to show all tasks");
+    }
+
     const dateField = "COALESCE(NULLIF(t.due_date, ''), t.created_at)";
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
-
-    // Fetch ALL tasks matching the filters (no date range restriction)
     const allTasksQuery = `
       SELECT 
         t.id,
@@ -4372,13 +4592,24 @@ app.get("/api/dashboard/tasks-timeline", (req, res) => {
         t.created_at,
         DATE(${dateField}) as task_date
       FROM tasks t
-      JOIN users u ON u.id = t.assignee_id
+      LEFT JOIN users u ON u.id = t.assignee_id
       ${joinClause}
       ${whereClause}
       ORDER BY DATE(${dateField}) ASC, t.created_at DESC
     `;
 
-    console.log("Fetching ALL tasks with filters:", { conditions, params });
+    console.log("Fetching tasks with filters:", {
+      role: normalizedRole,
+      userId,
+      projectId: projectId || 'all',
+      employeeId: employeeId || 'all',
+      startDate: validatedStartDate || 'none',
+      endDate: validatedEndDate || 'none',
+      conditions: conditions.length > 0 ? conditions : ['(no filters - showing all tasks)'],
+      params,
+      whereClause: conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '(no WHERE clause)',
+      sqlQuery: allTasksQuery.replace(/\s+/g, ' ').trim()
+    });
 
     pool.execute(allTasksQuery, params, (err, allRows) => {
       if (err) {
@@ -4387,6 +4618,50 @@ app.get("/api/dashboard/tasks-timeline", (req, res) => {
       }
 
       console.log(`Total tasks fetched: ${allRows.length}`);
+      
+      // For managers, check if they have project assignments
+      if ((normalizedRole === 'manager' || normalizedRole === 'team_lead') && userId) {
+        pool.execute(
+          "SELECT COUNT(*) as count FROM project_assignments WHERE assigned_to_user_id = ?",
+          [userId],
+          (assignErr, assignRows) => {
+            if (!assignErr && assignRows && assignRows[0]) {
+              const assignmentCount = assignRows[0].count || 0;
+              console.log(`Manager/Team Lead (userId: ${userId}) has ${assignmentCount} project assignment(s)`);
+              if (assignmentCount === 0 && allRows.length === 0) {
+                console.warn("WARNING: Manager has NO project assignments! They won't see any tasks.");
+                console.warn("Solution: Assign projects to this manager in the project_assignments table.");
+              }
+            }
+          }
+        );
+      }
+      
+      if (allRows.length === 0) {
+        console.warn("WARNING: No tasks found! This could be due to:");
+        console.warn("  1. No tasks in database");
+        console.warn("  2. Role-based filtering excluding all tasks");
+        if (normalizedRole === 'manager' || normalizedRole === 'team_lead') {
+          console.warn("     - Manager might not have project assignments in project_assignments table");
+        }
+        console.warn("  3. Date filtering excluding all tasks");
+        console.warn("  4. Project/Employee filtering excluding all tasks");
+        console.warn("  5. Tasks have no assignee (if using INNER JOIN)");
+      } else {
+        console.log(`Sample tasks (first 5):`, allRows.slice(0, 5).map(r => ({
+          id: r.id,
+          title: r.title,
+          assignee: r.assignee,
+          due_date: r.due_date,
+          created_at: r.created_at,
+          task_date: r.task_date,
+          status: r.status
+        })));
+        console.log(`Week boundaries for categorization:`, {
+          thisWeek: `${thisWeekStartStr} to ${thisWeekEndStr}`,
+          nextWeek: `${nextWeekStartStr} to ${nextWeekEndStr}`
+        });
+      }
 
       // Categorize tasks into this week and next week based on their due dates
       const thisWeekTasks = [];
@@ -4436,36 +4711,68 @@ app.get("/api/dashboard/tasks-timeline", (req, res) => {
           }
         }
 
-        // Debug logging for tasks with due dates
-        if (row.due_date && row.due_date !== '' && row.due_date !== null) {
-          console.log(`Task "${row.title}" - due_date: ${row.due_date}, taskDate: ${taskDate}, today: ${todayStr}, thisWeekEnd: ${endOfThisWeekStr}, nextWeekStart: ${startOfNextWeekStr}, nextWeekEnd: ${endOfNextWeekStr}`);
-        }
-
+        // Categorize task based on actual calendar week boundaries
+        // For superadmin with "all" filters and managers, show all tasks (categorize by their dates)
+        // For employees, only show tasks from "this week" and "next week"
+        const isManagerOrSuperAdmin = isSuperAdminWithAllFilters || (normalizedRole === 'manager' || normalizedRole === 'team_lead');
+        
         if (taskDate) {
-          // Compare dates as strings (YYYY-MM-DD format)
-          // This week: from today to end of this week (Saturday)
-          if (taskDate >= todayStr && taskDate <= endOfThisWeekStr) {
+          const taskDateObj = new Date(taskDate);
+          taskDateObj.setHours(0, 0, 0, 0); // Normalize to start of day for comparison
+          
+          // Compare dates (not times) for categorization
+          if (taskDateObj >= thisWeekStart && taskDateObj <= thisWeekEnd) {
             thisWeekTasks.push(row);
-          } 
-          // Next week: from start of next week (Sunday) to end of next week (Saturday)
-          else if (taskDate >= startOfNextWeekStr && taskDate <= endOfNextWeekStr) {
+            console.log(`Task "${row.title}" categorized as THIS WEEK (date: ${taskDate}, range: ${thisWeekStartStr} to ${thisWeekEndStr})`);
+          } else if (taskDateObj >= nextWeekStart && taskDateObj <= nextWeekEnd) {
+            // Task falls within next week boundaries
             nextWeekTasks.push(row);
-          } 
-          // Past tasks: show in this week for visibility
-          else if (taskDate < todayStr) {
-            thisWeekTasks.push(row);
-          }
-          // Future tasks beyond next week: show in next week for visibility
-          else {
-            nextWeekTasks.push(row);
+            console.log(`Task "${row.title}" categorized as NEXT WEEK (date: ${taskDate}, range: ${nextWeekStartStr} to ${nextWeekEndStr})`);
+          } else if (isManagerOrSuperAdmin) {
+            // For superadmin with "all" filters and managers, include tasks outside this week/next week
+            // Categorize based on whether they're before this week (past) or after next week (future)
+            if (taskDateObj < thisWeekStart) {
+              // Past task - add to "this week" section for display
+              thisWeekTasks.push(row);
+              console.log(`Task "${row.title}" categorized as PAST (date: ${taskDate} < ${thisWeekStartStr}) - added to thisWeek for ${isSuperAdminWithAllFilters ? 'superadmin' : 'manager'}`);
+            } else if (taskDateObj > nextWeekEnd) {
+              // Future task - add to "next week" section for display
+              nextWeekTasks.push(row);
+              console.log(`Task "${row.title}" categorized as FUTURE (date: ${taskDate} > ${nextWeekEndStr}) - added to nextWeek for ${isSuperAdminWithAllFilters ? 'superadmin' : 'manager'}`);
+            }
+          } else {
+            // Task is outside "this week" and "next week" - don't include in timeline
+            // (This is expected for employees - "Tasks This Week" and "Tasks Next Week" only show tasks from those specific weeks)
+            console.log(`Task "${row.title}" NOT categorized (date: ${taskDate} is outside thisWeek/nextWeek boundaries)`);
           }
         } else {
-          // No date available - show in this week
-          thisWeekTasks.push(row);
+          // If no valid date, include in "this week" for superadmin/managers, otherwise skip
+          if (isManagerOrSuperAdmin) {
+            thisWeekTasks.push(row);
+            console.log(`Task "${row.title}" has no valid date - added to thisWeek for ${isSuperAdminWithAllFilters ? 'superadmin' : 'manager'}`);
+          } else {
+            console.log(`Task "${row.title}" has no valid date, skipping`);
+          }
         }
       });
 
-      console.log(`Categorized: This Week: ${thisWeekTasks.length}, Next Week: ${nextWeekTasks.length}`);
+      console.log(`Categorized: This Week: ${thisWeekTasks.length}, Next Week: ${nextWeekTasks.length}, Total fetched: ${allRows.length}`);
+      if (allRows.length > 0 && (thisWeekTasks.length === 0 && nextWeekTasks.length === 0)) {
+        console.warn("WARNING: Tasks were fetched but none were categorized into this week or next week!");
+        console.warn("This means all tasks are outside the current week and next week boundaries.");
+        console.warn("Week boundaries:", {
+          thisWeek: `${thisWeekStartStr} to ${thisWeekEndStr}`,
+          nextWeek: `${nextWeekStartStr} to ${nextWeekEndStr}`
+        });
+        // Show sample task dates
+        const sampleTasks = allRows.slice(0, 5);
+        console.warn("Sample task dates:", sampleTasks.map(t => ({
+          title: t.title,
+          due_date: t.due_date,
+          created_at: t.created_at,
+          task_date: t.task_date
+        })));
+      }
 
       const mapRow = (row) => {
         const statusColor =
