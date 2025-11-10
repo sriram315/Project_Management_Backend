@@ -4393,24 +4393,71 @@ app.get("/api/dashboard/tasks-timeline", (req, res) => {
       const nextWeekTasks = [];
 
       allRows.forEach(row => {
-        let taskDate = row.task_date ? String(row.task_date) : null;
+        // Prioritize due_date over created_at for categorization
+        let taskDate = null;
         
-        // If no task_date, try to get from created_at
+        // First, try to use due_date if it exists and is not empty
+        if (row.due_date && row.due_date !== '' && row.due_date !== null) {
+          // due_date might be a Date object or a string
+          if (row.due_date instanceof Date) {
+            taskDate = formatDate(row.due_date);
+          } else {
+            // If it's a string, try to parse it
+            const dueDateObj = new Date(row.due_date);
+            if (!isNaN(dueDateObj.getTime())) {
+              taskDate = formatDate(dueDateObj);
+            }
+          }
+        }
+        
+        // If no valid due_date, use task_date from query (which uses COALESCE)
+        if (!taskDate && row.task_date) {
+          if (row.task_date instanceof Date) {
+            taskDate = formatDate(row.task_date);
+          } else {
+            // Extract date part if it includes time
+            const dateStr = String(row.task_date).split(' ')[0];
+            if (dateStr.match(/^\d{4}-\d{2}-\d{2}$/)) {
+              taskDate = dateStr;
+            } else {
+              const dateObj = new Date(row.task_date);
+              if (!isNaN(dateObj.getTime())) {
+                taskDate = formatDate(dateObj);
+              }
+            }
+          }
+        }
+        
+        // Last resort: use created_at
         if (!taskDate && row.created_at) {
           const createdDate = new Date(row.created_at);
-          taskDate = formatDate(createdDate);
+          if (!isNaN(createdDate.getTime())) {
+            taskDate = formatDate(createdDate);
+          }
+        }
+
+        // Debug logging for tasks with due dates
+        if (row.due_date && row.due_date !== '' && row.due_date !== null) {
+          console.log(`Task "${row.title}" - due_date: ${row.due_date}, taskDate: ${taskDate}, today: ${todayStr}, thisWeekEnd: ${endOfThisWeekStr}, nextWeekStart: ${startOfNextWeekStr}, nextWeekEnd: ${endOfNextWeekStr}`);
         }
 
         if (taskDate) {
           // Compare dates as strings (YYYY-MM-DD format)
+          // This week: from today to end of this week (Saturday)
           if (taskDate >= todayStr && taskDate <= endOfThisWeekStr) {
             thisWeekTasks.push(row);
-          } else if (taskDate >= startOfNextWeekStr && taskDate <= endOfNextWeekStr) {
+          } 
+          // Next week: from start of next week (Sunday) to end of next week (Saturday)
+          else if (taskDate >= startOfNextWeekStr && taskDate <= endOfNextWeekStr) {
             nextWeekTasks.push(row);
-          } else {
-            // Tasks outside this week/next week - show in "this week" for visibility
-            // This ensures ALL tasks are visible, not just those in current/next week
+          } 
+          // Past tasks: show in this week for visibility
+          else if (taskDate < todayStr) {
             thisWeekTasks.push(row);
+          }
+          // Future tasks beyond next week: show in next week for visibility
+          else {
+            nextWeekTasks.push(row);
           }
         } else {
           // No date available - show in this week
