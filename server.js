@@ -1501,12 +1501,18 @@ app.put("/api/projects/:id", (req, res) => {
   
   // Validate status if provided
   if (updateData.status !== undefined) {
+    // Normalize status to lowercase for validation
+    const statusLower = String(updateData.status).toLowerCase().trim();
     const validStatuses = ['active', 'inactive', 'completed', 'dropped'];
-    if (!validStatuses.includes(updateData.status)) {
+    if (!validStatuses.includes(statusLower)) {
+      console.error(`Invalid status received: "${updateData.status}" (normalized: "${statusLower}")`);
       return res.status(400).json({ 
         message: `Invalid status. Must be one of: ${validStatuses.join(', ')}` 
       });
     }
+    // Ensure status is saved in lowercase
+    updateData.status = statusLower;
+    console.log(`Status normalized: "${updateData.status}" -> "${statusLower}"`);
   }
 
   // Build dynamic query based on provided fields
@@ -1548,14 +1554,28 @@ app.put("/api/projects/:id", (req, res) => {
   console.log("Update project query:", query);
   console.log("Update project values:", values);
   console.log("Update project status value:", updateData.status);
+  console.log("Update project status type:", typeof updateData.status);
 
   pool.execute(query, values, (err, results) => {
     if (err) {
       console.error("Update project error:", err);
+      console.error("Error code:", err.code);
+      console.error("Error message:", err.message);
+      console.error("Error sqlState:", err.sqlState);
       console.error("Query:", query);
       console.error("Values:", values);
+      
+      // Check if it's an ENUM value error
+      if (err.code === 'WARN_DATA_TRUNCATED' || err.message.includes('ENUM') || err.message.includes('status')) {
+        return res.status(400).json({ 
+          message: `Invalid status value. The database may not support this status value. Error: ${err.message}` 
+        });
+      }
+      
       return res.status(500).json({ message: "Database error" });
     }
+    
+    console.log("Update successful, affected rows:", results.affectedRows);
     
     // Verify the update by fetching the updated project
     pool.execute("SELECT * FROM projects WHERE id = ?", [id], (fetchErr, fetchResults) => {
@@ -1565,7 +1585,9 @@ app.put("/api/projects/:id", (req, res) => {
       }
       
       const updatedProject = fetchResults[0];
-      console.log("Updated project status in DB:", updatedProject?.status);
+      console.log("Updated project status in DB (raw):", updatedProject?.status);
+      console.log("Updated project status type:", typeof updatedProject?.status);
+      console.log("Updated project full record:", JSON.stringify(updatedProject, null, 2));
       
       // Normalize status for response
       if (updatedProject) {
@@ -1573,6 +1595,7 @@ app.put("/api/projects/:id", (req, res) => {
         let normalizedStatus = raw;
         if (raw === 'on_hold' || raw === 'cancelled') normalizedStatus = 'inactive';
         if (raw === 'planning') normalizedStatus = 'active';
+        console.log("Normalized status for response:", normalizedStatus);
         updatedProject.status = normalizedStatus;
       }
       
@@ -3731,6 +3754,14 @@ app.get("/api/dashboard/data", (req, res) => {
                 allWeeks.push(`${year}-W${week.toString().padStart(2, "0")}`);
               }
 
+              // Calculate total available hours from utilization data (for fallback and overall calculation)
+              // Use the totalAvailableHours from the database query (line 3688) as the default per-week value
+              // If no utilization data, use the total from the query divided by number of weeks, or 0
+              const calculatedTotalAvailableHours = utilizationData.reduce((sum, d) => sum + (d.availableHours || 0), 0);
+              const defaultAvailableHoursPerWeek = allWeeks.length > 0 && calculatedTotalAvailableHours === 0 
+                ? (totalAvailableHours / allWeeks.length) 
+                : (calculatedTotalAvailableHours / Math.max(allWeeks.length, 1));
+
               // Merge all datasets
               const mergedData = allWeeks.map((week) => {
                 const util = utilizationData.find((d) => d.week === week);
@@ -3755,7 +3786,7 @@ app.get("/api/dashboard/data", (req, res) => {
                   hours: prod ? prod.hours : 0,
                   productivity: prod ? prod.productivity : null,
                   plannedHours: prod ? prod.plannedHours : 0,
-                  availableHours: avail ? avail.availableHours : totalAvailableHours,
+                  availableHours: avail ? avail.availableHours : (util ? util.availableHours : defaultAvailableHoursPerWeek),
                 };
               });
 
@@ -3766,12 +3797,17 @@ app.get("/api/dashboard/data", (req, res) => {
               const overallProductivity = totalPlannedHours > 0 ? (totalActualHours / totalPlannedHours) * 100 : 0;
               
               // Utilization = (Planned / Available) × 100
-              const totalAvailableHours = utilizationData.reduce((sum, d) => sum + (d.availableHours || 0), 0);
-              const overallUtilization = totalAvailableHours > 0 ? (totalPlannedHours / totalAvailableHours) * 100 : 0;
+              // Use calculatedTotalAvailableHours if available, otherwise use totalAvailableHours from query
+              const totalAvailableHoursForUtilization = calculatedTotalAvailableHours > 0 
+                ? calculatedTotalAvailableHours 
+                : totalAvailableHours;
+              const overallUtilization = totalAvailableHoursForUtilization > 0 
+                ? (totalPlannedHours / totalAvailableHoursForUtilization) * 100 
+                : 0;
 
               console.log("=== FINAL MERGED DATA ===");
               console.log(`Overall Productivity: ${overallProductivity.toFixed(1)}% (${totalActualHours.toFixed(1)}h actual / ${totalPlannedHours.toFixed(1)}h planned)`);
-              console.log(`Overall Utilization: ${overallUtilization.toFixed(1)}% (${totalPlannedHours.toFixed(1)}h planned / ${totalAvailableHours.toFixed(1)}h available)`);
+              console.log(`Overall Utilization: ${overallUtilization.toFixed(1)}% (${totalPlannedHours.toFixed(1)}h planned / ${totalAvailableHoursForUtilization.toFixed(1)}h available)`);
               console.log(`Total Weeks: ${mergedData.length}`);
               if (mergedData.length > 0) {
                 console.log("Sample merged data (first week):", JSON.stringify(mergedData[0], null, 2));
@@ -3787,7 +3823,7 @@ app.get("/api/dashboard/data", (req, res) => {
                   utilization: overallUtilization,
                   totalActualHours: totalActualHours,
                   totalPlannedHours: totalPlannedHours,
-                  totalAvailableHours: totalAvailableHours
+                  totalAvailableHours: totalAvailableHoursForUtilization
                 }
               });
             });
