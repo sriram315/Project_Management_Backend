@@ -963,7 +963,7 @@ app.post("/api/users", (req, res) => {
     );
     if (duplicateUsername) {
       return res.status(400).json({
-        message: `Username "${username}" already exists. Please use a different username.`,
+        message: "The username is already taken.",
         field: "username",
         type: "duplicate_username",
       });
@@ -973,7 +973,7 @@ app.post("/api/users", (req, res) => {
     const duplicateEmail = checkResults.find((user) => user.email === email);
     if (duplicateEmail) {
       return res.status(400).json({
-        message: `Email "${email}" already exists. Please use a different email address.`,
+        message: "The email is already taken.",
         field: "email",
         type: "duplicate_email",
       });
@@ -994,13 +994,13 @@ app.post("/api/users", (req, res) => {
           if (err.code === "ER_DUP_ENTRY") {
             if (err.sqlMessage.includes("username")) {
               return res.status(400).json({
-                message: `Username "${username}" already exists. Please use a different username.`,
+                message: "The username is already taken.",
                 field: "username",
                 type: "duplicate_username",
               });
             } else if (err.sqlMessage.includes("email")) {
               return res.status(400).json({
-                message: `Email "${email}" already exists. Please use a different email address.`,
+                message: "The email is already taken.",
                 field: "email",
                 type: "duplicate_email",
               });
@@ -1080,45 +1080,68 @@ app.put("/api/users/:id", (req, res) => {
   const { id } = req.params;
   const { username, email, role, available_hours_per_week } = req.body;
 
-  // First, check if email already exists for a different user
-  const checkEmailQuery = "SELECT id FROM users WHERE email = ? AND id != ?";
-
-  pool.execute(checkEmailQuery, [email, id], (checkErr, checkResults) => {
-    if (checkErr) {
-      console.error("Email check error:", checkErr);
+  // First, check if username already exists for a different user
+  const checkUsernameQuery = "SELECT id FROM users WHERE username = ? AND id != ?";
+  
+  pool.execute(checkUsernameQuery, [username, id], (checkUsernameErr, checkUsernameResults) => {
+    if (checkUsernameErr) {
+      console.error("Username check error:", checkUsernameErr);
       return res.status(500).json({ message: "Database error" });
     }
 
-    if (checkResults.length > 0) {
+    if (checkUsernameResults.length > 0) {
       return res.status(400).json({
-        message: "Email already exists. Please use a different email address.",
-        field: "email",
+        message: "The username is already taken.",
+        field: "username",
       });
     }
 
-    // If email is unique or unchanged, proceed with update
-    const updateQuery =
-      "UPDATE users SET username = ?, email = ?, role = ?, available_hours_per_week = ? WHERE id = ?";
+    // Check if email already exists for a different user
+    const checkEmailQuery = "SELECT id FROM users WHERE email = ? AND id != ?";
 
-    pool.execute(
-      updateQuery,
-      [username, email, role, available_hours_per_week || 40, id],
-      (err, results) => {
-        if (err) {
-          console.error("Update user error:", err);
-          // Check if it's a duplicate key error for email
-          if (err.code === "ER_DUP_ENTRY" && err.sqlMessage.includes("email")) {
-            return res.status(400).json({
-              message:
-                "Email already exists. Please use a different email address.",
-              field: "email",
-            });
-          }
-          return res.status(500).json({ message: "Database error" });
-        }
-        res.json({ message: "User updated successfully" });
+    pool.execute(checkEmailQuery, [email, id], (checkEmailErr, checkEmailResults) => {
+      if (checkEmailErr) {
+        console.error("Email check error:", checkEmailErr);
+        return res.status(500).json({ message: "Database error" });
       }
-    );
+
+      if (checkEmailResults.length > 0) {
+        return res.status(400).json({
+          message: "The email is already taken.",
+          field: "email",
+        });
+      }
+
+      // If both username and email are unique, proceed with update
+      const updateQuery =
+        "UPDATE users SET username = ?, email = ?, role = ?, available_hours_per_week = ? WHERE id = ?";
+
+      pool.execute(
+        updateQuery,
+        [username, email, role, available_hours_per_week || 40, id],
+        (err, results) => {
+          if (err) {
+            console.error("Update user error:", err);
+            // Check if it's a duplicate key error
+            if (err.code === "ER_DUP_ENTRY") {
+              if (err.sqlMessage.includes("email")) {
+                return res.status(400).json({
+                  message: "The email is already taken.",
+                  field: "email",
+                });
+              } else if (err.sqlMessage.includes("username")) {
+                return res.status(400).json({
+                  message: "The username is already taken.",
+                  field: "username",
+                });
+              }
+            }
+            return res.status(500).json({ message: "Database error" });
+          }
+          res.json({ message: "User updated successfully" });
+        }
+      );
+    });
   });
 });
 
@@ -4722,44 +4745,15 @@ app.get("/api/dashboard/tasks-timeline", (req, res) => {
         }
 
         // Categorize task based on actual calendar week boundaries
-        // For superadmin with "all" filters and managers, show all tasks (categorize by their dates)
-        // For employees, if a date range is selected, use that range; otherwise use calendar weeks
+        // Always use calendar week boundaries (Monday-Sunday) for categorization
+        // The selected date range is only used for filtering which tasks to fetch, not for categorization
         const isManagerOrSuperAdmin = isSuperAdminWithAllFilters || (normalizedRole === 'manager' || normalizedRole === 'team_lead');
         
-        // For employees with a selected date range, use the selected range boundaries instead of calendar weeks
-        let effectiveThisWeekStart = thisWeekStart;
-        let effectiveThisWeekEnd = thisWeekEnd;
-        let effectiveNextWeekStart = nextWeekStart;
-        let effectiveNextWeekEnd = nextWeekEnd;
-        
-        if (normalizedRole === 'employee' && validatedStartDate && validatedEndDate) {
-          // Employee has selected a date range - split it in half for "this week" and "next week"
-          const rangeStart = new Date(validatedStartDate);
-          rangeStart.setHours(0, 0, 0, 0);
-          const rangeEnd = new Date(validatedEndDate);
-          rangeEnd.setHours(23, 59, 59, 999);
-          
-          // Calculate midpoint of the date range
-          const rangeDuration = rangeEnd.getTime() - rangeStart.getTime();
-          const midpoint = new Date(rangeStart.getTime() + rangeDuration / 2);
-          midpoint.setHours(0, 0, 0, 0);
-          
-          // First half goes to "this week", second half goes to "next week"
-          effectiveThisWeekStart = rangeStart;
-          effectiveThisWeekEnd = new Date(midpoint);
-          effectiveThisWeekEnd.setHours(23, 59, 59, 999);
-          
-          effectiveNextWeekStart = new Date(midpoint);
-          effectiveNextWeekStart.setDate(midpoint.getDate() + 1);
-          effectiveNextWeekStart.setHours(0, 0, 0, 0);
-          effectiveNextWeekEnd = rangeEnd;
-          
-          console.log(`Employee with date range: Using selected range for categorization`, {
-            selectedRange: { start: validatedStartDate, end: validatedEndDate },
-            thisWeek: { start: formatDate(effectiveThisWeekStart), end: formatDate(effectiveThisWeekEnd) },
-            nextWeek: { start: formatDate(effectiveNextWeekStart), end: formatDate(effectiveNextWeekEnd) }
-          });
-        }
+        // Always use calendar week boundaries for categorization
+        const effectiveThisWeekStart = thisWeekStart;
+        const effectiveThisWeekEnd = thisWeekEnd;
+        const effectiveNextWeekStart = nextWeekStart;
+        const effectiveNextWeekEnd = nextWeekEnd;
         
         if (taskDate) {
           const taskDateObj = new Date(taskDate);
@@ -4785,37 +4779,9 @@ app.get("/api/dashboard/tasks-timeline", (req, res) => {
               nextWeekTasks.push(row);
               console.log(`Task "${row.title}" categorized as FUTURE (date: ${taskDate} > ${formatDate(effectiveNextWeekEnd)}) - added to nextWeek for ${isSuperAdminWithAllFilters ? 'superadmin' : 'manager'}`);
             }
-          } else if (normalizedRole === 'employee' && validatedStartDate && validatedEndDate) {
-            // For employees with a selected date range, include all tasks within the range
-            // Tasks outside the selected range should not appear (they were filtered by SQL)
-            // But if a task somehow got through, categorize it based on which half of the range it's in
-            if (taskDateObj < effectiveThisWeekStart) {
-              // Before range start - shouldn't happen due to SQL filter, but include in "this week" if it does
-              thisWeekTasks.push(row);
-              console.log(`Task "${row.title}" categorized as BEFORE RANGE (date: ${taskDate}) - added to thisWeek`);
-            } else if (taskDateObj > effectiveNextWeekEnd) {
-              // After range end - shouldn't happen due to SQL filter, but include in "next week" if it does
-              nextWeekTasks.push(row);
-              console.log(`Task "${row.title}" categorized as AFTER RANGE (date: ${taskDate}) - added to nextWeek`);
-            } else {
-              // Task is within range but not in either half - split at midpoint
-              const rangeStart = new Date(validatedStartDate);
-              rangeStart.setHours(0, 0, 0, 0);
-              const rangeEnd = new Date(validatedEndDate);
-              rangeEnd.setHours(23, 59, 59, 999);
-              const rangeDuration = rangeEnd.getTime() - rangeStart.getTime();
-              const midpoint = new Date(rangeStart.getTime() + rangeDuration / 2);
-              
-              if (taskDateObj <= midpoint) {
-                thisWeekTasks.push(row);
-                console.log(`Task "${row.title}" categorized as FIRST HALF (date: ${taskDate}) - added to thisWeek`);
-              } else {
-                nextWeekTasks.push(row);
-                console.log(`Task "${row.title}" categorized as SECOND HALF (date: ${taskDate}) - added to nextWeek`);
-              }
-            }
           } else {
-            // Employee without date range - task is outside calendar "this week" and "next week" - don't include
+            // Task is outside calendar "this week" and "next week" boundaries - don't include
+            // (This applies to all roles including employees)
             console.log(`Task "${row.title}" NOT categorized (date: ${taskDate} is outside thisWeek/nextWeek boundaries)`);
           }
         } else {
@@ -4823,11 +4789,8 @@ app.get("/api/dashboard/tasks-timeline", (req, res) => {
           if (isManagerOrSuperAdmin) {
             thisWeekTasks.push(row);
             console.log(`Task "${row.title}" has no valid date - added to thisWeek for ${isSuperAdminWithAllFilters ? 'superadmin' : 'manager'}`);
-          } else if (normalizedRole === 'employee' && validatedStartDate && validatedEndDate) {
-            // For employees with date range, include tasks without dates in "this week"
-            thisWeekTasks.push(row);
-            console.log(`Task "${row.title}" has no valid date - added to thisWeek for employee with date range`);
           } else {
+            // For employees and other roles, skip tasks without valid dates
             console.log(`Task "${row.title}" has no valid date, skipping`);
           }
         }
