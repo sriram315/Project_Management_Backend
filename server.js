@@ -2626,6 +2626,32 @@ app.get("/api/tasks/:id/daily-updates", (req, res) => {
   });
 });
 
+// Get task details by ID
+app.get("/api/tasks/:id", (req, res) => {
+  const { id } = req.params;
+  const query = `
+    SELECT 
+      t.*,
+      u.username as assignee_name,
+      p.name as project_name
+    FROM tasks t
+    LEFT JOIN users u ON t.assignee_id = u.id
+    LEFT JOIN projects p ON t.project_id = p.id
+    WHERE t.id = ?
+  `;
+
+  pool.execute(query, [id], (err, rows) => {
+    if (err) {
+      console.error("Task detail fetch error:", err);
+      return res.status(500).json({ message: "Database error" });
+    }
+    if (!rows || rows.length === 0) {
+      return res.status(404).json({ message: "Task not found" });
+    }
+    res.json(rows[0]);
+  });
+});
+
 // Create a daily update for a task (must come before /api/tasks/:id routes)
 app.post("/api/tasks/:id/daily-updates", (req, res) => {
   console.log(`[Daily Updates] POST request for task ID: ${req.params.id}`);
@@ -4435,7 +4461,11 @@ app.get("/api/dashboard/tasks-timeline", (req, res) => {
       projectId: projectId || 'all',
       employeeId: employeeId || 'all',
       startDate: startDate || 'none',
-      endDate: endDate || 'none'
+      endDate: endDate || 'none',
+      projectIdType: typeof projectId,
+      employeeIdType: typeof employeeId,
+      projectIdValue: projectId,
+      employeeIdValue: employeeId
     });
 
     // Role-based filtering:
@@ -4481,10 +4511,11 @@ app.get("/api/dashboard/tasks-timeline", (req, res) => {
     // For superadmin (or any other role), no role-based restrictions are added
 
     // Handle projectId filter (applies to all roles including superadmin)
-    // Only filter if projectId is explicitly provided and not "all"
+    // Only filter if projectId is explicitly provided and not "all" or empty
     // For managers, the projectId filter should be combined with their assigned projects
-    if (projectId && projectId !== "all") {
-      const projectIds = String(projectId).split(',').map(id => id.trim()).filter(id => id);
+    if (projectId && projectId !== "all" && projectId !== "" && projectId !== "undefined") {
+      const projectIds = String(projectId).split(',').map(id => id.trim()).filter(id => id && id !== "undefined");
+      console.log(`ProjectId filter processing: input="${projectId}", parsed=[${projectIds.join(',')}], role=${normalizedRole}`);
       if (projectIds.length > 0) {
         if (normalizedRole === 'manager' || normalizedRole === 'team_lead') {
           // For managers, ensure the selected projects are within their assigned projects
@@ -4504,33 +4535,46 @@ app.get("/api/dashboard/tasks-timeline", (req, res) => {
             console.log(`Manager/Team Lead: Added assigned projects filter with projectId filter`);
           }
         } else {
-          // For non-managers, just filter by projectId
+          // For non-managers (including superadmin), just filter by projectId
           if (projectIds.length === 1) {
             conditions.push("t.project_id = ?");
             params.push(projectIds[0]);
+            console.log(`Superadmin/Other: Added projectId filter (single): ${projectIds[0]}`);
           } else {
             const placeholders = projectIds.map(() => '?').join(',');
             conditions.push(`t.project_id IN (${placeholders})`);
             params.push(...projectIds);
+            console.log(`Superadmin/Other: Added projectId filter (multiple): [${projectIds.join(',')}]`);
           }
         }
+      } else {
+        console.log(`ProjectId filter: No valid project IDs after parsing "${projectId}"`);
       }
+    } else {
+      console.log(`ProjectId filter: Not applied (projectId="${projectId}", role=${normalizedRole})`);
     }
 
     // Handle employeeId filter (for non-employee roles like superadmin and managers)
-    // Only filter if employeeId is explicitly provided and not "all"
-    if (normalizedRole !== 'employee' && employeeId && employeeId !== "all") {
-      const employeeIds = String(employeeId).split(',').map(id => id.trim()).filter(id => id);
+    // Only filter if employeeId is explicitly provided and not "all" or empty
+    if (normalizedRole !== 'employee' && employeeId && employeeId !== "all" && employeeId !== "" && employeeId !== "undefined") {
+      const employeeIds = String(employeeId).split(',').map(id => id.trim()).filter(id => id && id !== "undefined");
+      console.log(`EmployeeId filter processing: input="${employeeId}", parsed=[${employeeIds.join(',')}], role=${normalizedRole}`);
       if (employeeIds.length > 0) {
         if (employeeIds.length === 1) {
           conditions.push("t.assignee_id = ?");
           params.push(employeeIds[0]);
+          console.log(`Superadmin/Manager: Added employeeId filter (single): ${employeeIds[0]}`);
         } else {
           const placeholders = employeeIds.map(() => '?').join(',');
           conditions.push(`t.assignee_id IN (${placeholders})`);
           params.push(...employeeIds);
+          console.log(`Superadmin/Manager: Added employeeId filter (multiple): [${employeeIds.join(',')}]`);
         }
+      } else {
+        console.log(`EmployeeId filter: No valid employee IDs after parsing "${employeeId}"`);
       }
+    } else {
+      console.log(`EmployeeId filter: Not applied (employeeId="${employeeId}", role=${normalizedRole}, isEmployee=${normalizedRole === 'employee'})`);
     }
 
     // Format date as YYYY-MM-DD in local timezone
@@ -4580,35 +4624,22 @@ app.get("/api/dashboard/tasks-timeline", (req, res) => {
       selectedDateRange: { start: validatedStartDate || 'none', end: validatedEndDate || 'none' }
     });
 
-    // Apply date filters to the query ONLY if dates are explicitly provided
-    // For superadmin with "all" filters and managers, don't apply date filters - show all tasks
-    // This allows superadmin and managers to see all tasks from their assigned projects
-    const isSuperAdminWithAllFilters = (normalizedRole === 'super_admin' || normalizedRole === 'superadmin') 
-      && (!projectId || projectId === 'all') 
-      && (!employeeId || employeeId === 'all');
+    // Apply date filters to the query when dates are explicitly provided
+    // Always respect date filters when they are provided, regardless of other filter settings
+    // This ensures that when a user selects a date range, only tasks within that range are shown
+    if (validatedStartDate) {
+      conditions.push("DATE(COALESCE(NULLIF(t.due_date, ''), t.created_at)) >= DATE(?)");
+      params.push(validatedStartDate);
+      console.log(`Applying start date filter: ${validatedStartDate}`);
+    }
+    if (validatedEndDate) {
+      conditions.push("DATE(COALESCE(NULLIF(t.due_date, ''), t.created_at)) <= DATE(?)");
+      params.push(validatedEndDate);
+      console.log(`Applying end date filter: ${validatedEndDate}`);
+    }
     
-    const isManagerWithAllFilters = (normalizedRole === 'manager' || normalizedRole === 'team_lead')
-      && (!projectId || projectId === 'all')
-      && (!employeeId || employeeId === 'all');
-    
-    // Don't apply date filters for superadmin with "all" filters or managers with "all" filters
-    // This ensures they see all tasks from their assigned projects/projects
-    if (!isSuperAdminWithAllFilters && !isManagerWithAllFilters) {
-      // Apply date filters for employees or when specific filters are selected
-      if (validatedStartDate) {
-        conditions.push("DATE(COALESCE(NULLIF(t.due_date, ''), t.created_at)) >= DATE(?)");
-        params.push(validatedStartDate);
-      }
-      if (validatedEndDate) {
-        conditions.push("DATE(COALESCE(NULLIF(t.due_date, ''), t.created_at)) <= DATE(?)");
-        params.push(validatedEndDate);
-      }
-    } else {
-      if (isSuperAdminWithAllFilters) {
-        console.log("Superadmin with 'all' filters: Ignoring date filters to show all tasks");
-      } else if (isManagerWithAllFilters) {
-        console.log(`Manager/Team Lead (userId: ${userId}) with 'all' filters: Ignoring date filters to show all tasks from assigned projects`);
-      }
+    if (!validatedStartDate && !validatedEndDate) {
+      console.log("No date filters provided - showing all tasks within role-based restrictions");
     }
 
     const dateField = "COALESCE(NULLIF(t.due_date, ''), t.created_at)";
@@ -4746,8 +4777,10 @@ app.get("/api/dashboard/tasks-timeline", (req, res) => {
 
         // Categorize task based on actual calendar week boundaries
         // Always use calendar week boundaries (Monday-Sunday) for categorization
-        // The selected date range is only used for filtering which tasks to fetch, not for categorization
-        const isManagerOrSuperAdmin = isSuperAdminWithAllFilters || (normalizedRole === 'manager' || normalizedRole === 'team_lead');
+        // When a date range is selected, only categorize tasks that fall within calendar week boundaries
+        // When no date range is selected, managers/superadmins can see tasks outside calendar weeks
+        const isManagerOrSuperAdmin = (normalizedRole === 'super_admin' || normalizedRole === 'superadmin' || normalizedRole === 'manager' || normalizedRole === 'team_lead');
+        const hasDateFilter = validatedStartDate || validatedEndDate;
         
         // Always use calendar week boundaries for categorization
         const effectiveThisWeekStart = thisWeekStart;
@@ -4767,31 +4800,36 @@ app.get("/api/dashboard/tasks-timeline", (req, res) => {
             // Task falls within next week boundaries
             nextWeekTasks.push(row);
             console.log(`Task "${row.title}" categorized as NEXT WEEK (date: ${taskDate}, range: ${formatDate(effectiveNextWeekStart)} to ${formatDate(effectiveNextWeekEnd)})`);
-          } else if (isManagerOrSuperAdmin) {
-            // For superadmin with "all" filters and managers, include tasks outside this week/next week
-            // Categorize based on whether they're before this week (past) or after next week (future)
+          } else if (isManagerOrSuperAdmin && !hasDateFilter) {
+            // Only add tasks outside calendar week boundaries if:
+            // 1. User is manager/superadmin AND
+            // 2. No date range filter is selected (showing all tasks)
+            // This allows managers to see all tasks when no date filter is applied
             if (taskDateObj < effectiveThisWeekStart) {
               // Past task - add to "this week" section for display
               thisWeekTasks.push(row);
-              console.log(`Task "${row.title}" categorized as PAST (date: ${taskDate} < ${formatDate(effectiveThisWeekStart)}) - added to thisWeek for ${isSuperAdminWithAllFilters ? 'superadmin' : 'manager'}`);
+              console.log(`Task "${row.title}" categorized as PAST (date: ${taskDate} < ${formatDate(effectiveThisWeekStart)}) - added to thisWeek for manager/superadmin (no date filter)`);
             } else if (taskDateObj > effectiveNextWeekEnd) {
               // Future task - add to "next week" section for display
               nextWeekTasks.push(row);
-              console.log(`Task "${row.title}" categorized as FUTURE (date: ${taskDate} > ${formatDate(effectiveNextWeekEnd)}) - added to nextWeek for ${isSuperAdminWithAllFilters ? 'superadmin' : 'manager'}`);
+              console.log(`Task "${row.title}" categorized as FUTURE (date: ${taskDate} > ${formatDate(effectiveNextWeekEnd)}) - added to nextWeek for manager/superadmin (no date filter)`);
             }
           } else {
             // Task is outside calendar "this week" and "next week" boundaries - don't include
-            // (This applies to all roles including employees)
-            console.log(`Task "${row.title}" NOT categorized (date: ${taskDate} is outside thisWeek/nextWeek boundaries)`);
+            // This applies when:
+            // - Date range is selected (respect the date range filter)
+            // - User is not manager/superadmin
+            // - Task is outside calendar week boundaries
+            console.log(`Task "${row.title}" NOT categorized (date: ${taskDate} is outside thisWeek/nextWeek boundaries${hasDateFilter ? ', date filter is active' : ''})`);
           }
         } else {
-          // If no valid date, include in "this week" for superadmin/managers, otherwise skip
-          if (isManagerOrSuperAdmin) {
+          // If no valid date, only include in "this week" for managers/superadmins when no date filter is active
+          if (isManagerOrSuperAdmin && !hasDateFilter) {
             thisWeekTasks.push(row);
-            console.log(`Task "${row.title}" has no valid date - added to thisWeek for ${isSuperAdminWithAllFilters ? 'superadmin' : 'manager'}`);
+            console.log(`Task "${row.title}" has no valid date - added to thisWeek for manager/superadmin (no date filter)`);
           } else {
-            // For employees and other roles, skip tasks without valid dates
-            console.log(`Task "${row.title}" has no valid date, skipping`);
+            // For employees, or when date filter is active, skip tasks without valid dates
+            console.log(`Task "${row.title}" has no valid date, skipping${hasDateFilter ? ' (date filter is active)' : ''}`);
           }
         }
       });
@@ -4837,6 +4875,7 @@ app.get("/api/dashboard/tasks-timeline", (req, res) => {
           statusColor,
           estimated: Number(row.estimated) || 0,
           logged: Number(row.logged) || 0,
+          due_date: row.due_date || null,
         };
       };
 
