@@ -38,7 +38,8 @@ function generateWeekRange(start, end) {
 //   - Available Time = available hours per week
 app.get("/api/dashboard/data", (req, res) => {
   try {
-    const { projectId, employeeId, startDate, endDate, userId, userRole } = req.query;
+    const { projectId, employeeId, startDate, endDate, userId, userRole } =
+      req.query;
 
     console.log("Dashboard data request:", {
       projectId,
@@ -56,13 +57,16 @@ app.get("/api/dashboard/data", (req, res) => {
     // Build base filters (project, employee, role-based)
     // Handle multiple projectIds
     if (projectId && projectId !== "all") {
-      const projectIds = String(projectId).split(',').map(id => id.trim()).filter(id => id);
+      const projectIds = String(projectId)
+        .split(",")
+        .map((id) => id.trim())
+        .filter((id) => id);
       if (projectIds.length > 0) {
         if (projectIds.length === 1) {
           whereConditions.push("t.project_id = ?");
           queryParams.push(projectIds[0]);
         } else {
-          const placeholders = projectIds.map(() => '?').join(',');
+          const placeholders = projectIds.map(() => "?").join(",");
           whereConditions.push(`t.project_id IN (${placeholders})`);
           queryParams.push(...projectIds);
         }
@@ -71,32 +75,39 @@ app.get("/api/dashboard/data", (req, res) => {
 
     // Handle multiple employeeIds
     if (employeeId && employeeId !== "all") {
-      const employeeIds = String(employeeId).split(',').map(id => id.trim()).filter(id => id);
+      const employeeIds = String(employeeId)
+        .split(",")
+        .map((id) => id.trim())
+        .filter((id) => id);
       if (employeeIds.length > 0) {
         if (employeeIds.length === 1) {
           whereConditions.push("t.assignee_id = ?");
           queryParams.push(employeeIds[0]);
         } else {
-          const placeholders = employeeIds.map(() => '?').join(',');
+          const placeholders = employeeIds.map(() => "?").join(",");
           whereConditions.push(`t.assignee_id IN (${placeholders})`);
           queryParams.push(...employeeIds);
         }
       }
-    } else if (userRole === 'employee' && userId) {
+    } else if (userRole === "employee" && userId) {
       // Employees see only their own tasks by default
       whereConditions.push("t.assignee_id = ?");
       queryParams.push(userId);
     }
 
     // Role-based filtering for managers
-    if (userId && userRole && (userRole === 'manager' || userRole === 'team_lead')) {
+    if (
+      userId &&
+      userRole &&
+      (userRole === "manager" || userRole === "team_lead")
+    ) {
       // Check if manager has project assignments
       const checkAssignmentsQuery = `
         SELECT COUNT(*) as count
         FROM project_assignments
         WHERE assigned_to_user_id = ?
       `;
-      
+
       pool.execute(checkAssignmentsQuery, [userId], (checkErr, checkRows) => {
         if (checkErr) {
           console.error("Check assignments error:", checkErr);
@@ -106,12 +117,13 @@ app.get("/api/dashboard/data", (req, res) => {
             availabilityData: [],
           });
         }
-        
+
         const hasAssignments = checkRows[0]?.count > 0;
-        
+
         if (hasAssignments) {
           // Manager has assignments - filter by assigned projects
-          joinClause = "INNER JOIN project_assignments pa ON t.project_id = pa.project_id";
+          joinClause =
+            "INNER JOIN project_assignments pa ON t.project_id = pa.project_id";
           whereConditions.push("pa.assigned_to_user_id = ?");
           queryParams.push(userId);
         } else {
@@ -122,7 +134,7 @@ app.get("/api/dashboard/data", (req, res) => {
             availabilityData: [],
           });
         }
-        
+
         executeDashboardQueries();
       });
       return;
@@ -135,20 +147,25 @@ app.get("/api/dashboard/data", (req, res) => {
       // Add date filters
       const dateWhereConditions = [...whereConditions];
       const dateQueryParams = [...queryParams];
-      
+
       if (startDate) {
-        dateWhereConditions.push("DATE(COALESCE(t.due_date, t.created_at)) >= ?");
+        dateWhereConditions.push(
+          "DATE(COALESCE(t.due_date, t.created_at)) >= ?"
+        );
         dateQueryParams.push(startDate);
       }
 
       if (endDate) {
-        dateWhereConditions.push("DATE(COALESCE(t.due_date, t.created_at)) <= ?");
+        dateWhereConditions.push(
+          "DATE(COALESCE(t.due_date, t.created_at)) <= ?"
+        );
         dateQueryParams.push(endDate);
       }
 
-      const whereClause = dateWhereConditions.length > 0
-        ? `WHERE ${dateWhereConditions.join(" AND ")}`
-        : "";
+      const whereClause =
+        dateWhereConditions.length > 0
+          ? `WHERE ${dateWhereConditions.join(" AND ")}`
+          : "";
 
       // ========== UTILIZATION QUERY ==========
       // Utilization = (Actual Working Time / Available Time) × 100
@@ -206,20 +223,28 @@ app.get("/api/dashboard/data", (req, res) => {
 
       // Get total available hours from relevant users
       if (employeeId && employeeId !== "all") {
-        const employeeIds = String(employeeId).split(',').map(id => id.trim()).filter(id => id);
+        const employeeIds = String(employeeId)
+          .split(",")
+          .map((id) => id.trim())
+          .filter((id) => id);
         if (employeeIds.length === 1) {
-          totalAvailableQuery = "SELECT COALESCE(SUM(available_hours_per_week), 0) as total FROM users WHERE id = ?";
+          totalAvailableQuery =
+            "SELECT COALESCE(SUM(available_hours_per_week), 0) as total FROM users WHERE id = ?";
           totalAvailableParams = [employeeIds[0]];
         } else {
-          const placeholders = employeeIds.map(() => '?').join(',');
+          const placeholders = employeeIds.map(() => "?").join(",");
           totalAvailableQuery = `SELECT COALESCE(SUM(available_hours_per_week), 0) as total FROM users WHERE id IN (${placeholders})`;
           totalAvailableParams = employeeIds;
         }
-      } else if (userRole === 'employee' && userId) {
-        totalAvailableQuery = "SELECT COALESCE(SUM(available_hours_per_week), 0) as total FROM users WHERE id = ?";
+      } else if (userRole === "employee" && userId) {
+        totalAvailableQuery =
+          "SELECT COALESCE(SUM(available_hours_per_week), 0) as total FROM users WHERE id = ?";
         totalAvailableParams = [userId];
       } else if (projectId && projectId !== "all") {
-        const projectIds = String(projectId).split(',').map(id => id.trim()).filter(id => id);
+        const projectIds = String(projectId)
+          .split(",")
+          .map((id) => id.trim())
+          .filter((id) => id);
         if (projectIds.length === 1) {
           totalAvailableQuery = `
             SELECT COALESCE(SUM(COALESCE(u.available_hours_per_week, 40)), 0) as total
@@ -229,7 +254,7 @@ app.get("/api/dashboard/data", (req, res) => {
           `;
           totalAvailableParams = [projectIds[0]];
         } else {
-          const placeholders = projectIds.map(() => '?').join(',');
+          const placeholders = projectIds.map(() => "?").join(",");
           totalAvailableQuery = `
             SELECT COALESCE(SUM(COALESCE(u.available_hours_per_week, 40)), 0) as total
             FROM users u
@@ -238,7 +263,11 @@ app.get("/api/dashboard/data", (req, res) => {
           `;
           totalAvailableParams = projectIds;
         }
-      } else if (userId && userRole && (userRole === 'manager' || userRole === 'team_lead')) {
+      } else if (
+        userId &&
+        userRole &&
+        (userRole === "manager" || userRole === "team_lead")
+      ) {
         totalAvailableQuery = `
           SELECT COALESCE(SUM(COALESCE(u.available_hours_per_week, 40)), 0) as total
           FROM users u
@@ -248,7 +277,8 @@ app.get("/api/dashboard/data", (req, res) => {
         `;
         totalAvailableParams = [userId];
       } else {
-        totalAvailableQuery = "SELECT COALESCE(SUM(COALESCE(available_hours_per_week, 40)), 0) as total FROM users";
+        totalAvailableQuery =
+          "SELECT COALESCE(SUM(COALESCE(available_hours_per_week, 40)), 0) as total FROM users";
         totalAvailableParams = [];
       }
 
@@ -270,98 +300,145 @@ app.get("/api/dashboard/data", (req, res) => {
       `;
 
       // Execute queries
-      pool.execute(utilizationQuery, dateQueryParams, (err, utilizationRows) => {
-        if (err) {
-          console.error("Utilization query error:", err);
-          return res.status(500).json({ error: "Database error", details: err.message });
-        }
-
-        pool.execute(productivityQuery, dateQueryParams, (err, productivityRows) => {
+      pool.execute(
+        utilizationQuery,
+        dateQueryParams,
+        (err, utilizationRows) => {
           if (err) {
-            console.error("Productivity query error:", err);
-            return res.status(500).json({ error: "Database error", details: err.message });
+            console.error("Utilization query error:", err);
+            return res
+              .status(500)
+              .json({ error: "Database error", details: err.message });
           }
 
-          pool.execute(totalAvailableQuery, totalAvailableParams, (err, totalAvailableRows) => {
-            if (err) {
-              console.error("Total available hours query error:", err);
-              return res.status(500).json({ error: "Database error", details: err.message });
-            }
-
-            const totalAvailableHours = parseFloat(totalAvailableRows[0]?.total) || 0;
-            const availabilityParams = [totalAvailableHours, ...dateQueryParams];
-
-            pool.execute(availabilityQuery, availabilityParams, (err, availabilityRows) => {
+          pool.execute(
+            productivityQuery,
+            dateQueryParams,
+            (err, productivityRows) => {
               if (err) {
-                console.error("Availability query error:", err);
-                return res.status(500).json({ error: "Database error", details: err.message });
+                console.error("Productivity query error:", err);
+                return res
+                  .status(500)
+                  .json({ error: "Database error", details: err.message });
               }
 
-              // Format data
-              const utilizationData = utilizationRows.map((row) => ({
-                week: row.week,
-                utilization: parseFloat(row.utilization_percentage) || 0,
-                actualHours: parseFloat(row.actual_working_hours) || 0,
-                availableHours: parseFloat(row.total_available_hours) || 0,
-              }));
+              pool.execute(
+                totalAvailableQuery,
+                totalAvailableParams,
+                (err, totalAvailableRows) => {
+                  if (err) {
+                    console.error("Total available hours query error:", err);
+                    return res
+                      .status(500)
+                      .json({ error: "Database error", details: err.message });
+                  }
 
-              const productivityData = productivityRows.map((row) => ({
-                week: row.week,
-                completed: parseInt(row.completed_tasks) || 0,
-                total: parseInt(row.total_tasks) || 0,
-                hours: parseFloat(row.actual_hours) || 0,
-                plannedHours: parseFloat(row.planned_hours) || 0,
-                // Use productivity_by_hours if available, otherwise use productivity_by_tasks
-                productivity: parseFloat(row.productivity_by_hours) || parseFloat(row.productivity_by_tasks) || 0,
-              }));
+                  const totalAvailableHours =
+                    parseFloat(totalAvailableRows[0]?.total) || 0;
+                  const availabilityParams = [
+                    totalAvailableHours,
+                    ...dateQueryParams,
+                  ];
 
-              const availabilityData = availabilityRows.map((row) => ({
-                week: row.week,
-                availableHours: parseFloat(row.available_hours) || 0,
-              }));
+                  pool.execute(
+                    availabilityQuery,
+                    availabilityParams,
+                    (err, availabilityRows) => {
+                      if (err) {
+                        console.error("Availability query error:", err);
+                        return res.status(500).json({
+                          error: "Database error",
+                          details: err.message,
+                        });
+                      }
 
-              // Generate all weeks in range
-              const allWeeks = (startDate && endDate)
-                ? generateWeekRange(startDate, endDate)
-                : Array.from(new Set([
-                    ...utilizationData.map((d) => d.week),
-                    ...productivityData.map((d) => d.week),
-                    ...availabilityData.map((d) => d.week),
-                  ]));
+                      // Format data
+                      const utilizationData = utilizationRows.map((row) => ({
+                        week: row.week,
+                        utilization:
+                          parseFloat(row.utilization_percentage) || 0,
+                        actualHours: parseFloat(row.actual_working_hours) || 0,
+                        availableHours:
+                          parseFloat(row.total_available_hours) || 0,
+                      }));
 
-              if (allWeeks.length === 0) {
-                const now = new Date();
-                const year = now.getFullYear();
-                const week = getWeekNumber(now);
-                allWeeks.push(`${year}-W${week.toString().padStart(2, "0")}`);
-              }
+                      const productivityData = productivityRows.map((row) => ({
+                        week: row.week,
+                        completed: parseInt(row.completed_tasks) || 0,
+                        total: parseInt(row.total_tasks) || 0,
+                        hours: parseFloat(row.actual_hours) || 0,
+                        plannedHours: parseFloat(row.planned_hours) || 0,
+                        // Use productivity_by_hours if available, otherwise use productivity_by_tasks
+                        productivity:
+                          parseFloat(row.productivity_by_hours) ||
+                          parseFloat(row.productivity_by_tasks) ||
+                          0,
+                      }));
 
-              // Merge all datasets
-              const mergedData = allWeeks.map((week) => {
-                const util = utilizationData.find((d) => d.week === week);
-                const prod = productivityData.find((d) => d.week === week);
-                const avail = availabilityData.find((d) => d.week === week);
+                      const availabilityData = availabilityRows.map((row) => ({
+                        week: row.week,
+                        availableHours: parseFloat(row.available_hours) || 0,
+                      }));
 
-                return {
-                  week,
-                  utilization: util ? util.utilization : null,
-                  completed: prod ? prod.completed : 0,
-                  hours: prod ? prod.hours : 0,
-                  productivity: prod ? prod.productivity : null,
-                  plannedHours: prod ? prod.plannedHours : 0,
-                  availableHours: avail ? avail.availableHours : totalAvailableHours,
-                };
-              });
+                      // Generate all weeks in range
+                      const allWeeks =
+                        startDate && endDate
+                          ? generateWeekRange(startDate, endDate)
+                          : Array.from(
+                              new Set([
+                                ...utilizationData.map((d) => d.week),
+                                ...productivityData.map((d) => d.week),
+                                ...availabilityData.map((d) => d.week),
+                              ])
+                            );
 
-              res.json({
-                utilizationData: mergedData,
-                productivityData: mergedData,
-                availabilityData: mergedData,
-              });
-            });
-          });
-        });
-      });
+                      if (allWeeks.length === 0) {
+                        const now = new Date();
+                        const year = now.getFullYear();
+                        const week = getWeekNumber(now);
+                        allWeeks.push(
+                          `${year}-W${week.toString().padStart(2, "0")}`
+                        );
+                      }
+
+                      // Merge all datasets
+                      const mergedData = allWeeks.map((week) => {
+                        const util = utilizationData.find(
+                          (d) => d.week === week
+                        );
+                        const prod = productivityData.find(
+                          (d) => d.week === week
+                        );
+                        const avail = availabilityData.find(
+                          (d) => d.week === week
+                        );
+
+                        return {
+                          week,
+                          utilization: util ? util.utilization : null,
+                          completed: prod ? prod.completed : 0,
+                          hours: prod ? prod.hours : 0,
+                          productivity: prod ? prod.productivity : null,
+                          plannedHours: prod ? prod.plannedHours : 0,
+                          availableHours: avail
+                            ? avail.availableHours
+                            : totalAvailableHours,
+                        };
+                      });
+
+                      res.json({
+                        utilizationData: mergedData,
+                        productivityData: mergedData,
+                        availabilityData: mergedData,
+                      });
+                    }
+                  );
+                }
+              );
+            }
+          );
+        }
+      );
     }
   } catch (error) {
     console.error("Dashboard data error:", error);
@@ -372,4 +449,3 @@ app.get("/api/dashboard/data", (req, res) => {
     });
   }
 });
-
