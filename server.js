@@ -4303,31 +4303,16 @@ app.get("/api/dashboard/data", (req, res) => {
 
 app.post("/api/dashboard/raw-tasks", (req, res) => {
   try {
-    // Accept values from body first (POST), fallback to query (GET)
-    const {
-      projectId: projectIdBody,
-      employeeId: employeeIdBody,
-      startDate: startDateBody,
-      endDate: endDateBody,
-      userId: userIdBody,
-      userRole: userRoleBody,
-    } = req.body || {};
+    // ------------------ READ FILTERS ------------------
+    const body = req.body || {};
+    const query = req.query || {};
 
-    const {
-      projectId: projectIdQuery,
-      employeeId: employeeIdQuery,
-      startDate: startDateQuery,
-      endDate: endDateQuery,
-      userId: userIdQuery,
-      userRole: userRoleQuery,
-    } = req.query || {};
-
-    const projectId = projectIdBody ?? projectIdQuery;
-    const employeeId = employeeIdBody ?? employeeIdQuery;
-    const startDate = startDateBody ?? startDateQuery;
-    const endDate = endDateBody ?? endDateQuery;
-    const userId = userIdBody ?? userIdQuery;
-    const userRole = userRoleBody ?? userRoleQuery;
+    const projectId = body.projectId ?? query.projectId;
+    const employeeId = body.employeeId ?? query.employeeId;
+    const startDate = body.startDate ?? query.startDate;
+    const endDate = body.endDate ?? query.endDate;
+    const userId = body.userId ?? query.userId;
+    const userRole = body.userRole ?? query.userRole;
 
     console.log("Incoming filter values:", {
       projectId,
@@ -4338,28 +4323,21 @@ app.post("/api/dashboard/raw-tasks", (req, res) => {
       userRole,
     });
 
-    // Helper to parse comma list or array into clean string array
+    // ------------------ HELPERS ------------------
     const parseIds = (value) => {
-      if (value == null || value === "") {
-        return [];
-      }
-
-      // Normalize to an array of strings
-      let items;
-      if (Array.isArray(value)) {
-        items = value.flatMap((v) => String(v).split(","));
-      } else {
-        items = String(value).split(",");
-      }
-
-      // Trim and filter out empty strings
+      if (!value) return [];
+      let items = Array.isArray(value)
+        ? value.flatMap((v) => String(v).split(","))
+        : String(value).split(",");
       return items.map((v) => v.trim()).filter((v) => v !== "");
     };
+
+    const requestedEmployeeIds = parseIds(employeeId);
 
     let whereConditions = [];
     let params = [];
 
-    // 1️⃣ PROJECT FILTER (multi-value)
+    // ------------------ PROJECT FILTER ------------------
     const projectIds = parseIds(projectId);
     if (projectIds.length > 0) {
       whereConditions.push(
@@ -4368,27 +4346,23 @@ app.post("/api/dashboard/raw-tasks", (req, res) => {
       params.push(...projectIds);
     }
 
-    // 2️⃣ EMPLOYEE FILTER — but respect role-based restriction
+    // ------------------ EMPLOYEE FILTER ------------------
     let useEmployeeFilter = true;
 
     if (userRole === "employee" && userId) {
-      // Employee can ONLY see their own tasks — ignore any provided employeeId
       whereConditions.push("t.assignee_id = ?");
       params.push(String(userId));
       useEmployeeFilter = false;
     }
 
-    if (useEmployeeFilter) {
-      const employeeIds = parseIds(employeeId);
-      if (employeeIds.length > 0) {
-        whereConditions.push(
-          `t.assignee_id IN (${employeeIds.map(() => "?").join(",")})`
-        );
-        params.push(...employeeIds.map((id) => String(id)));
-      }
+    if (useEmployeeFilter && requestedEmployeeIds.length > 0) {
+      whereConditions.push(
+        `t.assignee_id IN (${requestedEmployeeIds.map(() => "?").join(",")})`
+      );
+      params.push(...requestedEmployeeIds);
     }
 
-    // 3️⃣ DATE FILTERS
+    // ------------------ DATE FILTER ------------------
     if (startDate) {
       whereConditions.push(
         "DATE(COALESCE(NULLIF(t.due_date, ''), t.created_at)) >= ?"
@@ -4408,6 +4382,7 @@ app.post("/api/dashboard/raw-tasks", (req, res) => {
         ? `WHERE ${whereConditions.join(" AND ")}`
         : "";
 
+    // ------------------ SQL QUERY ------------------
     const sql = `
       SELECT 
         t.id,
@@ -4431,15 +4406,7 @@ app.post("/api/dashboard/raw-tasks", (req, res) => {
     console.log("FINAL SQL:", sql.replace(/\s+/g, " ").trim());
     console.log("FINAL PARAMS:", params);
 
-    // pool.execute(sql, params, (err, rows) => {
-    //   if (err) {
-    //     console.error("Raw SQL error:", err);
-    //     return res
-    //       .status(500)
-    //       .json({ error: "Database error", details: err.message });
-    //   }
-    //   return res.json({ tasks: rows });
-    // });
+    // ------------------ EXECUTE QUERY ------------------
     pool.execute(sql, params, (err, rows) => {
       if (err) {
         console.error("Raw SQL error:", err);
@@ -4448,7 +4415,7 @@ app.post("/api/dashboard/raw-tasks", (req, res) => {
           .json({ error: "Database error", details: err.message });
       }
 
-      // ------------------ STATUS COUNTS (from all rows) ------------------
+      // ------------------ STATUS COUNTS ------------------
       const statusCounts = {
         todo: 0,
         in_progress: 0,
@@ -4457,8 +4424,9 @@ app.post("/api/dashboard/raw-tasks", (req, res) => {
       };
 
       rows.forEach((task) => {
-        const s = task.status;
-        if (statusCounts.hasOwnProperty(s)) statusCounts[s]++;
+        if (statusCounts.hasOwnProperty(task.status)) {
+          statusCounts[task.status]++;
+        }
       });
 
       const totalTasks =
@@ -4466,27 +4434,27 @@ app.post("/api/dashboard/raw-tasks", (req, res) => {
         statusCounts.in_progress +
         statusCounts.completed +
         statusCounts.blocked;
+
       const completedTasks = statusCounts.completed;
       const pendingTasks =
         statusCounts.todo + statusCounts.in_progress + statusCounts.blocked;
 
-      // ------------------ GROUP BY USER (for availability & productivity) ------------------
+      // ------------------ GROUP BY USER ------------------
       const userMap = {}; // key = assignee_id
 
       rows.forEach((task) => {
         const uid = task.assignee_id;
-        if (uid == null) return; // skip malformed rows
+        if (uid == null) return;
 
         if (!userMap[uid]) {
           userMap[uid] = {
-            plannedAll: 0, // sum of planned_hours for ALL tasks
-            plannedCompleted: 0, // sum of planned_hours for COMPLETED tasks only
-            actualCompleted: 0, // sum of actual_hours for COMPLETED tasks only
+            plannedAll: 0,
+            plannedCompleted: 0,
+            actualCompleted: 0,
             maxWeek: Number(task.available_hours_per_week) || 40,
           };
         }
 
-        // add planned for all tasks (used to compute available_hours)
         if (task.planned_hours != null) {
           userMap[uid].plannedAll += Number(task.planned_hours);
         }
@@ -4495,55 +4463,55 @@ app.post("/api/dashboard/raw-tasks", (req, res) => {
           const planned = Number(task.planned_hours) || 0;
           let actual = Number(task.actual_hours) || 0;
 
-          // NEW RULE: If actual is zero, replace with planned hours
-          if (!actual || actual === 0) {
-            actual = planned;
-          }
+          // Apply your new rule: completed task with 0 actual → use planned
+          if (!actual || actual === 0) actual = planned;
 
           userMap[uid].plannedCompleted += planned;
           userMap[uid].actualCompleted += actual;
         }
       });
 
+      // ------------------ ADD USERS WITH NO TASKS ------------------
+      requestedEmployeeIds.forEach((eid) => {
+        if (!userMap[eid]) {
+          userMap[eid] = {
+            plannedAll: 0,
+            plannedCompleted: 0,
+            actualCompleted: 0,
+            maxWeek: 40,
+          };
+        }
+      });
+
       // ------------------ AGGREGATE TOTALS ------------------
-      let totalActualCompleted = 0; // sum of actual (completed tasks)
-      let totalPlannedCompletedCapped = 0; // sum of capped planned for completed tasks
-      let totalAvailableHours = 0; // sum across users: maxWeek - min(plannedAll, maxWeek)
-      let totalCapacity = 0; // sum of each user's maxWeek (for utilization denom)
+      let totalActualCompleted = 0;
+      let totalAvailableHours = 0;
+      let totalCapacity = 0;
 
       Object.values(userMap).forEach((u) => {
-        const maxWeek = Number(u.maxWeek) || 40;
+        const maxWeek = u.maxWeek;
 
-        // for available hours, cap the user's total planned across all tasks to maxWeek
         const cappedPlannedAll = Math.min(u.plannedAll, maxWeek);
         const availableForUser = Math.max(0, maxWeek - cappedPlannedAll);
 
-        // for productivity, cap plannedCompleted per user to maxWeek (business rule)
-        const cappedPlannedCompleted = Math.min(u.plannedCompleted, maxWeek);
-
-        totalActualCompleted += u.actualCompleted || 0;
-        totalPlannedCompletedCapped += cappedPlannedCompleted || 0;
+        totalActualCompleted += u.actualCompleted;
         totalAvailableHours += availableForUser;
         totalCapacity += maxWeek;
       });
 
-      // total planned for ALL tasks (completed + pending)
+      // ------------------ TOTAL PLANNED FOR PRODUCTIVITY ------------------
       let totalPlannedAll = 0;
-
       rows.forEach((t) => {
-        if (t.planned_hours != null) {
-          totalPlannedAll += Number(t.planned_hours);
-        }
+        if (t.planned_hours != null) totalPlannedAll += Number(t.planned_hours);
       });
 
-      // productivity = completed_actual / total_planned_all
+      // ------------------ PRODUCTIVITY ------------------
       const productivity =
         totalPlannedAll > 0
           ? Number(((totalActualCompleted / totalPlannedAll) * 100).toFixed(2))
           : 0;
 
-      // Utilization: actual completed against total capacity (sum of user maxWeek)
-      // This shows overtime when >100%. Use totalCapacity (not 40) so multi-user groups are correct.
+      // ------------------ UTILIZATION ------------------
       const utilization =
         totalCapacity > 0
           ? Number(((totalActualCompleted / totalCapacity) * 100).toFixed(2))
@@ -4553,7 +4521,6 @@ app.post("/api/dashboard/raw-tasks", (req, res) => {
       return res.json({
         tasks: rows,
 
-        // Status metrics
         totalTasks,
         completed: completedTasks,
         pending: pendingTasks,
@@ -4561,7 +4528,6 @@ app.post("/api/dashboard/raw-tasks", (req, res) => {
         todo: statusCounts.todo,
         in_progress: statusCounts.in_progress,
 
-        // Productivity/Utilization/Availability
         productivity,
         utilization,
         available_hours: totalAvailableHours,
