@@ -4300,10 +4300,8 @@ app.get("/api/dashboard/data", (req, res) => {
     });
   }
 });
-
-app.post("/api/dashboard/raw-tasks", (req, res) => {
+app.post("/api/dashboard/raw-tasks", async (req, res) => {
   try {
-    // ------------------ READ FILTERS ------------------
     const body = req.body || {};
     const query = req.query || {};
 
@@ -4314,227 +4312,163 @@ app.post("/api/dashboard/raw-tasks", (req, res) => {
     const userId = body.userId ?? query.userId;
     const userRole = body.userRole ?? query.userRole;
 
-    console.log("Incoming filter values:", {
-      projectId,
-      employeeId,
-      startDate,
-      endDate,
-      userId,
-      userRole,
-    });
-
-    // ------------------ HELPERS ------------------
-    const parseIds = (value) => {
-      if (!value) return [];
-      let items = Array.isArray(value)
-        ? value.flatMap((v) => String(v).split(","))
-        : String(value).split(",");
-      return items.map((v) => v.trim()).filter((v) => v !== "");
+    // helper
+    const parseIds = (val) => {
+      if (!val) return [];
+      return String(val)
+        .split(",")
+        .map((v) => v.trim())
+        .filter((v) => v);
     };
 
-    const requestedEmployeeIds = parseIds(employeeId);
+    // final employee list used for availability
+    let finalEmployeeIds = parseIds(employeeId);
 
-    let whereConditions = [];
-    let params = [];
+    // 1️⃣ If projectId is provided → fetch employees assigned to this project
+    if (projectId && !employeeId) {
+      const [projRows] = await pool
+        .promise()
+        .execute(
+          `SELECT user_id FROM project_assignments WHERE project_id = ?`,
+          [projectId]
+        );
 
-    // ------------------ PROJECT FILTER ------------------
-    const projectIds = parseIds(projectId);
-    if (projectIds.length > 0) {
-      whereConditions.push(
-        `t.project_id IN (${projectIds.map(() => "?").join(",")})`
-      );
-      params.push(...projectIds);
+      finalEmployeeIds = projRows.map((r) => String(r.user_id));
     }
 
-    // ------------------ EMPLOYEE FILTER ------------------
-    let useEmployeeFilter = true;
-
-    if (userRole === "employee" && userId) {
-      whereConditions.push("t.assignee_id = ?");
-      params.push(String(userId));
-      useEmployeeFilter = false;
+    // 2️⃣ If employeeId is explicitly passed → override everything
+    if (employeeId) {
+      finalEmployeeIds = parseIds(employeeId);
     }
 
-    if (useEmployeeFilter && requestedEmployeeIds.length > 0) {
-      whereConditions.push(
-        `t.assignee_id IN (${requestedEmployeeIds.map(() => "?").join(",")})`
-      );
-      params.push(...requestedEmployeeIds);
+    // 3️⃣ If NO projectId and NO employeeId → include ALL employees
+    if (!projectId && !employeeId) {
+      const [allUsers] = await pool.promise().execute(`SELECT id FROM users`);
+      finalEmployeeIds = allUsers.map((u) => String(u.id));
     }
 
-    // ------------------ DATE FILTER ------------------
+    if (finalEmployeeIds.length === 0) {
+      return res.json({
+        tasks: [],
+        totalTasks: 0,
+        completed: 0,
+        pending: 0,
+        blocked: 0,
+        todo: 0,
+        in_progress: 0,
+        productivity: 0,
+        utilization: 0,
+        available_hours: finalEmployeeIds.length * 40,
+      });
+    }
+
+    // 4️⃣ Fetch tasks for these employees across ALL projects
+    let where = [
+      `t.assignee_id IN (${finalEmployeeIds.map(() => "?").join(",")})`,
+    ];
+    let params = [...finalEmployeeIds];
+
     if (startDate) {
-      whereConditions.push(
-        "DATE(COALESCE(NULLIF(t.due_date, ''), t.created_at)) >= ?"
-      );
+      where.push("DATE(t.due_date) >= ?");
       params.push(startDate);
     }
 
     if (endDate) {
-      whereConditions.push(
-        "DATE(COALESCE(NULLIF(t.due_date, ''), t.created_at)) <= ?"
-      );
+      where.push("DATE(t.due_date) <= ?");
       params.push(endDate);
     }
 
-    const whereClause =
-      whereConditions.length > 0
-        ? `WHERE ${whereConditions.join(" AND ")}`
-        : "";
-
-    // ------------------ SQL QUERY ------------------
     const sql = `
       SELECT 
-        t.id,
-        t.name,
-        t.status,
-        t.actual_hours,
-        t.planned_hours,
-        t.project_id,
-        t.assignee_id,
-        t.due_date,
-        t.created_at,
-        u.username,
-        u.available_hours_per_week,
-        DATE_FORMAT(COALESCE(NULLIF(t.due_date, ''), t.created_at), '%Y-W%u') AS week
+        t.id, t.name, t.status, t.actual_hours, t.planned_hours,
+        t.project_id, t.assignee_id, t.due_date, t.created_at,
+        u.username, u.available_hours_per_week
       FROM tasks t
-      JOIN users u ON t.assignee_id = u.id
-      ${whereClause}
+      JOIN users u ON u.id = t.assignee_id
+      WHERE ${where.join(" AND ")}
       ORDER BY t.id ASC
     `;
 
-    console.log("FINAL SQL:", sql.replace(/\s+/g, " ").trim());
-    console.log("FINAL PARAMS:", params);
+    const [rows] = await pool.promise().execute(sql, params);
 
-    // ------------------ EXECUTE QUERY ------------------
-    pool.execute(sql, params, (err, rows) => {
-      if (err) {
-        console.error("Raw SQL error:", err);
-        return res
-          .status(500)
-          .json({ error: "Database error", details: err.message });
-      }
-
-      // ------------------ STATUS COUNTS ------------------
-      const statusCounts = {
-        todo: 0,
-        in_progress: 0,
-        completed: 0,
-        blocked: 0,
-      };
-
-      rows.forEach((task) => {
-        if (statusCounts.hasOwnProperty(task.status)) {
-          statusCounts[task.status]++;
-        }
-      });
-
-      const totalTasks =
-        statusCounts.todo +
-        statusCounts.in_progress +
-        statusCounts.completed +
-        statusCounts.blocked;
-
-      const completedTasks = statusCounts.completed;
-      const pendingTasks =
-        statusCounts.todo + statusCounts.in_progress + statusCounts.blocked;
-
-      // ------------------ GROUP BY USER ------------------
-      const userMap = {}; // key = assignee_id
-
-      rows.forEach((task) => {
-        const uid = task.assignee_id;
-        if (uid == null) return;
-
-        if (!userMap[uid]) {
-          userMap[uid] = {
-            plannedAll: 0,
-            plannedCompleted: 0,
-            actualCompleted: 0,
-            maxWeek: Number(task.available_hours_per_week) || 40,
-          };
-        }
-
-        if (task.planned_hours != null) {
-          userMap[uid].plannedAll += Number(task.planned_hours);
-        }
-
-        if (task.status === "completed") {
-          const planned = Number(task.planned_hours) || 0;
-          let actual = Number(task.actual_hours) || 0;
-
-          // Apply your new rule: completed task with 0 actual → use planned
-          if (!actual || actual === 0) actual = planned;
-
-          userMap[uid].plannedCompleted += planned;
-          userMap[uid].actualCompleted += actual;
-        }
-      });
-
-      // ------------------ ADD USERS WITH NO TASKS ------------------
-      requestedEmployeeIds.forEach((eid) => {
-        if (!userMap[eid]) {
-          userMap[eid] = {
-            plannedAll: 0,
-            plannedCompleted: 0,
-            actualCompleted: 0,
-            maxWeek: 40,
-          };
-        }
-      });
-
-      // ------------------ AGGREGATE TOTALS ------------------
-      let totalActualCompleted = 0;
-      let totalAvailableHours = 0;
-      let totalCapacity = 0;
-
-      Object.values(userMap).forEach((u) => {
-        const maxWeek = u.maxWeek;
-
-        const cappedPlannedAll = Math.min(u.plannedAll, maxWeek);
-        const availableForUser = Math.max(0, maxWeek - cappedPlannedAll);
-
-        totalActualCompleted += u.actualCompleted;
-        totalAvailableHours += availableForUser;
-        totalCapacity += maxWeek;
-      });
-
-      // ------------------ TOTAL PLANNED FOR PRODUCTIVITY ------------------
-      let totalPlannedAll = 0;
-      rows.forEach((t) => {
-        if (t.planned_hours != null) totalPlannedAll += Number(t.planned_hours);
-      });
-
-      // ------------------ PRODUCTIVITY ------------------
-      const productivity =
-        totalPlannedAll > 0
-          ? Number(((totalActualCompleted / totalPlannedAll) * 100).toFixed(2))
-          : 0;
-
-      // ------------------ UTILIZATION ------------------
-      const utilization =
-        totalCapacity > 0
-          ? Number(((totalActualCompleted / totalCapacity) * 100).toFixed(2))
-          : 0;
-
-      // ------------------ RESPONSE ------------------
-      return res.json({
-        tasks: rows,
-
-        totalTasks,
-        completed: completedTasks,
-        pending: pendingTasks,
-        blocked: statusCounts.blocked,
-        todo: statusCounts.todo,
-        in_progress: statusCounts.in_progress,
-
-        productivity,
-        utilization,
-        available_hours: totalAvailableHours,
-      });
+    // status counters
+    const statusCounts = { todo: 0, in_progress: 0, completed: 0, blocked: 0 };
+    rows.forEach((t) => {
+      if (statusCounts[t.status] !== undefined) statusCounts[t.status]++;
     });
-  } catch (err) {
-    console.error("Raw tasks endpoint error:", err);
+
+    const totalTasks =
+      statusCounts.todo +
+      statusCounts.in_progress +
+      statusCounts.completed +
+      statusCounts.blocked;
+
+    // userMap for availability
+    const userMap = {};
+    finalEmployeeIds.forEach((eid) => {
+      userMap[eid] = {
+        plannedAll: 0,
+        actualCompleted: 0,
+        maxWeek: 40,
+      };
+    });
+
+    rows.forEach((task) => {
+      const uid = String(task.assignee_id);
+      if (!userMap[uid]) return;
+
+      const planned = Number(task.planned_hours) || 0;
+      let actual = Number(task.actual_hours) || 0;
+
+      if (task.status === "completed" && actual === 0) actual = planned;
+
+      userMap[uid].plannedAll += planned;
+      if (task.status === "completed") {
+        userMap[uid].actualCompleted += actual;
+      }
+    });
+
+    // final availability
+    let totalAvailableHours = 0;
+    let totalCapacity = 0;
+    let totalActualCompleted = 0;
+    let totalPlannedAll = 0;
+
+    Object.entries(userMap).forEach(([uid, u]) => {
+      const used = Math.min(u.plannedAll, u.maxWeek);
+      const available = Math.max(0, u.maxWeek - used);
+
+      totalAvailableHours += available;
+      totalActualCompleted += u.actualCompleted;
+      totalCapacity += u.maxWeek;
+      totalPlannedAll += u.plannedAll;
+    });
+
+    const productivity =
+      totalPlannedAll > 0
+        ? Number(((totalActualCompleted / totalPlannedAll) * 100).toFixed(2))
+        : 0;
+
+    const utilization =
+      totalCapacity > 0
+        ? Number(((totalActualCompleted / totalCapacity) * 100).toFixed(2))
+        : 0;
+
+    return res.json({
+      tasks: rows,
+      totalTasks,
+      completed: statusCounts.completed,
+      pending:
+        statusCounts.todo + statusCounts.in_progress + statusCounts.blocked,
+      blocked: statusCounts.blocked,
+      todo: statusCounts.todo,
+      in_progress: statusCounts.in_progress,
+      productivity,
+      utilization,
+      available_hours: totalAvailableHours,
+    });
+  } catch (e) {
+    console.error("Error:", e);
     return res.status(500).json({ error: "Server error" });
   }
 });
