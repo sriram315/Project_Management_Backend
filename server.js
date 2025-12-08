@@ -81,6 +81,7 @@ const swaggerOptions = {
             },
             task_type: { type: "string" },
             due_date: { type: "string", format: "date" },
+            start_date: { type: "string", format: "date" },
             status: {
               type: "string",
               enum: ["todo", "in_progress", "completed", "blocked"],
@@ -170,6 +171,35 @@ pool.execute(
       console.error("Failed to ensure task_reminders table:", tableErr.message);
     } else {
       console.log("task_reminders table is ready");
+    }
+  }
+);
+
+// Ensure start_date column exists in tasks table
+pool.execute(
+  `SELECT COLUMN_NAME 
+   FROM INFORMATION_SCHEMA.COLUMNS 
+   WHERE TABLE_SCHEMA = DATABASE() 
+   AND TABLE_NAME = 'tasks' 
+   AND COLUMN_NAME = 'start_date'`,
+  (checkErr, checkRows) => {
+    if (checkErr) {
+      console.error("Failed to check for start_date column:", checkErr.message);
+    } else if (checkRows.length === 0) {
+      // Column doesn't exist, add it
+      pool.execute(
+        `ALTER TABLE tasks 
+         ADD COLUMN start_date DATE NULL AFTER due_date`,
+        (alterErr) => {
+          if (alterErr) {
+            console.error("Failed to add start_date column:", alterErr.message);
+          } else {
+            console.log("start_date column added to tasks table");
+          }
+        }
+      );
+    } else {
+      console.log("start_date column already exists in tasks table");
     }
   }
 );
@@ -2612,6 +2642,10 @@ app.get("/api/tasks/assignee/:assigneeId", (req, res) => {
  *                 type: string
  *                 format: date
  *                 example: "2024-02-15"
+ *               start_date:
+ *                 type: string
+ *                 format: date
+ *                 example: "2024-02-01"
  *               attachments:
  *                 type: string
  *                 example: "design_brief.pdf"
@@ -2649,6 +2683,7 @@ app.post("/api/tasks", (req, res) => {
     priority,
     task_type,
     due_date,
+    start_date,
     attachments,
     status = "todo",
     // Workload tracking fields
@@ -2667,18 +2702,20 @@ app.post("/api/tasks", (req, res) => {
   const safeDescription = description || null;
   const safePriority = priority || "medium";
   const safeTaskType = task_type || "development";
-  const safeDueDate = due_date || null;
+  // Handle empty date strings - convert to NULL for database
+  const safeDueDate = due_date && due_date !== "" ? due_date : null;
+  const safeStartDate = start_date && start_date !== "" ? start_date : null;
   const safeAttachments = attachments || null;
   const safeWorkloadWarnings = workload_warnings || null;
 
   const query = `
         INSERT INTO tasks (
             name, description, assignee_id, project_id, planned_hours, 
-            priority, task_type, due_date, attachments, status,
+            priority, task_type, due_date, start_date, attachments, status,
             workload_warning_level, workload_warnings, utilization_percentage,
             allocation_utilization, weeks_until_due, current_task_count,
             total_workload_hours, available_hours, allocated_hours
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `;
 
   pool.execute(
@@ -2692,6 +2729,7 @@ app.post("/api/tasks", (req, res) => {
       safePriority,
       safeTaskType,
       safeDueDate,
+      safeStartDate,
       safeAttachments,
       status,
       workload_warning_level,
@@ -2707,7 +2745,12 @@ app.post("/api/tasks", (req, res) => {
     (err, results) => {
       if (err) {
         console.error("Add task error:", err);
-        return res.status(500).json({ message: "Database error" });
+        console.error("Error details:", err.message, err.code, err.sqlMessage);
+        return res.status(500).json({
+          message: "Database error",
+          error: err.message,
+          code: err.code,
+        });
       }
       res.json({ id: results.insertId, message: "Task added successfully" });
     }
@@ -2921,6 +2964,7 @@ app.put("/api/tasks/:id", (req, res) => {
     "actual_hours",
     "task_type",
     "due_date",
+    "start_date",
     "attachments",
     "work_description",
     "productivity_rating",
