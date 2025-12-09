@@ -2008,6 +2008,144 @@ app.post("/api/project-assignments", (req, res) => {
   });
 });
 
+// Update a project assignment
+app.put("/api/project-assignments/:id", (req, res) => {
+  const { id } = req.params;
+  const updateData = req.body;
+
+  // Build dynamic query based on provided fields
+  const fields = [];
+  const values = [];
+
+  const allowedFields = ["assigned_to_user_id", "assigned_by_user_id"];
+
+  // Check if assignment exists
+  const checkAssignmentQuery =
+    "SELECT id FROM project_assignments WHERE id = ?";
+  pool.execute(checkAssignmentQuery, [id], (checkErr, checkRows) => {
+    if (checkErr) {
+      console.error("Assignment check error:", checkErr);
+      return res.status(500).json({ message: "Database error" });
+    }
+    if (!checkRows || checkRows.length === 0) {
+      return res.status(404).json({ message: "Project assignment not found" });
+    }
+
+    // If assigned_to_user_id is being updated, verify it's a manager or team lead
+    if (updateData.assigned_to_user_id !== undefined) {
+      const checkUserQuery = "SELECT role FROM users WHERE id = ?";
+      pool.execute(
+        checkUserQuery,
+        [updateData.assigned_to_user_id],
+        (userErr, userRows) => {
+          if (userErr) {
+            console.error("User check error:", userErr);
+            return res.status(500).json({ message: "Database error" });
+          }
+          if (!userRows || userRows.length === 0) {
+            return res.status(404).json({ message: "User not found" });
+          }
+          const userRole = userRows[0].role;
+          if (userRole !== "manager" && userRole !== "team_lead") {
+            return res.status(400).json({
+              message: "Can only assign projects to managers or team leads",
+            });
+          }
+
+          // Check if assignment already exists for this project with new user
+          const checkExistingQuery = `
+          SELECT id FROM project_assignments 
+          WHERE project_id = (SELECT project_id FROM project_assignments WHERE id = ?)
+          AND assigned_to_user_id = ?
+          AND id != ?
+        `;
+          pool.execute(
+            checkExistingQuery,
+            [id, updateData.assigned_to_user_id, id],
+            (existingErr, existingRows) => {
+              if (existingErr) {
+                console.error("Existing assignment check error:", existingErr);
+                return res.status(500).json({ message: "Database error" });
+              }
+              if (existingRows && existingRows.length > 0) {
+                return res.status(400).json({
+                  message: "Project is already assigned to this user",
+                });
+              }
+
+              // Build update query
+              for (const [key, value] of Object.entries(updateData)) {
+                if (allowedFields.includes(key) && value !== undefined) {
+                  fields.push(`${key} = ?`);
+                  values.push(value || null);
+                }
+              }
+
+              if (fields.length === 0) {
+                return res.status(400).json({
+                  message: "No valid fields to update",
+                });
+              }
+
+              values.push(id); // Add ID for WHERE clause
+
+              const updateQuery = `UPDATE project_assignments SET ${fields.join(
+                ", "
+              )} WHERE id = ?`;
+
+              pool.execute(updateQuery, values, (updateErr, result) => {
+                if (updateErr) {
+                  console.error("Assignment update error:", updateErr);
+                  return res.status(500).json({
+                    message: "Failed to update project assignment",
+                  });
+                }
+                res.json({
+                  message: "Project assignment updated successfully",
+                  id: parseInt(id),
+                });
+              });
+            }
+          );
+        }
+      );
+    } else {
+      // No assigned_to_user_id update, proceed with other fields
+      for (const [key, value] of Object.entries(updateData)) {
+        if (allowedFields.includes(key) && value !== undefined) {
+          fields.push(`${key} = ?`);
+          values.push(value || null);
+        }
+      }
+
+      if (fields.length === 0) {
+        return res.status(400).json({
+          message: "No valid fields to update",
+        });
+      }
+
+      values.push(id); // Add ID for WHERE clause
+
+      const updateQuery = `UPDATE project_assignments SET ${fields.join(
+        ", "
+      )} WHERE id = ?`;
+
+      pool.execute(updateQuery, values, (updateErr, result) => {
+        if (updateErr) {
+          console.error("Assignment update error:", updateErr);
+          return res.status(500).json({
+            message: "Failed to update project assignment",
+          });
+        }
+        res.json({
+          message: "Project assignment updated successfully",
+          id: parseInt(id),
+        });
+      });
+    }
+  });
+});
+
 // Unassign a project from a manager/team lead
 app.delete("/api/project-assignments/:id", (req, res) => {
   const { id } = req.params;
@@ -5791,6 +5929,13 @@ app.post("/api/tasks/validate-workload", (req, res) => {
               let warningLevel = "none";
               let warnings = [];
 
+              // Calculate available hours AFTER adding the new task
+              const remainingAvailableHoursAfter = Math.max(
+                0,
+                availableHoursPerWeek - totalWorkload
+              );
+              const availableHoursPercentage = (remainingAvailableHoursAfter / totalCapacityPerWeek) * 100;
+
               if (utilizationPercentage > 100) {
                 warningLevel = "critical";
                 warnings.push(
@@ -5798,14 +5943,9 @@ app.post("/api/tasks/validate-workload", (req, res) => {
                     utilizationPercentage - 100
                   )}%`
                 );
-              } else if (utilizationPercentage > 80) {
-                warningLevel = "high";
-                warnings.push(
-                  `Employee utilization will be ${Math.round(
-                    utilizationPercentage
-                  )}%`
-                );
               }
+              // Removed warning for utilization >= 60% or available hours <= 40%
+              // User wants to allow creation without warning when available hours <= 40%
 
               if (allocationUtilization > 100) {
                 warningLevel = "critical";
@@ -5839,7 +5979,7 @@ app.post("/api/tasks/validate-workload", (req, res) => {
                   currentHours: currentWorkload,
                   newTaskHours: planned_hours,
                   totalHours: totalWorkload,
-                  availableHours: remainingAvailableHours,
+                  availableHours: remainingAvailableHoursAfter, // Available hours AFTER adding the new task
                   utilizationPercentage: Math.round(utilizationPercentage),
                   allocatedHours: totalAllocatedHours,
                   allocationUtilization: Math.round(allocationUtilization),
