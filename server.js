@@ -4655,7 +4655,875 @@ app.post("/api/dashboard/raw-tasks", async (req, res) => {
   }
 });
 
-// Get projects for filter dropdown
+// app.post("/api/dashboard/newData", async (req, res) => {
+//   try {
+//     const body = req.body || {};
+//     const query = req.query || {};
+
+//     const employeeId = body.employeeId ?? query.employeeId;
+//     const startDate = body.startDate ?? query.startDate;
+//     const endDate = body.endDate ?? query.endDate;
+//     const userId = body.userId ?? query.userId;
+//     const userRole = body.userRole ?? query.userRole;
+
+//     const parseIds = (val) =>
+//       !val
+//         ? []
+//         : String(val)
+//             .split(",")
+//             .map((x) => x.trim())
+//             .filter((x) => x);
+
+//     // -------------------------
+//     // Employee IDs
+//     // -------------------------
+//     let finalEmployeeIds = parseIds(employeeId);
+
+//     if (!employeeId && userRole === "employee") {
+//       finalEmployeeIds = [String(userId)];
+//     }
+
+//     if (!employeeId && userRole !== "employee") {
+//       const [rows] = await pool.promise().execute(`SELECT id FROM users`);
+//       finalEmployeeIds = rows.map((u) => String(u.id));
+//     }
+
+//     if (finalEmployeeIds.length === 0) {
+//       return res.json({
+//         filtersUsed: { employeeIds: finalEmployeeIds, startDate, endDate },
+//         users: finalEmployeeIds,
+//         tasks: [],
+//         output: {},
+//         finalSummary: {},
+//         final: {
+//           available_hours: 0,
+//           productivity: "0.00",
+//           utilization: "0.00",
+//         },
+//         availabilityData: [],
+//         productivityData: [],
+//         utilizationData: [],
+//         overallMetrics: {
+//           totalPlannedHours: 0,
+//           totalActualHours: 0,
+//           totalAvailableHours: 0,
+//           productivity: "0.00",
+//           utilization: "0.00",
+//         },
+//         taskStats: {
+//           total: 0,
+//           completed: 0,
+//           pending: 0,
+//           blocked: 0,
+//           in_progress: 0,
+//         },
+//       });
+//     }
+
+//     // -------------------------
+//     // Fetch Tasks
+//     // -------------------------
+//     let where = [
+//       `t.assignee_id IN (${finalEmployeeIds.map(() => "?").join(",")})`,
+//     ];
+//     const params = [...finalEmployeeIds];
+
+//     if (startDate) {
+//       where.push("DATE(t.due_date) >= ?");
+//       params.push(startDate);
+//     }
+//     if (endDate) {
+//       where.push("DATE(t.due_date) <= ?");
+//       params.push(endDate);
+//     }
+
+//     const sql = `
+//       SELECT
+//         t.*,
+//         u.username,
+//         COALESCE(u.available_hours_per_week, 40) AS available_hours_per_week
+//       FROM tasks t
+//       JOIN users u ON u.id = t.assignee_id
+//       WHERE ${where.join(" AND ")}
+//       ORDER BY t.due_date ASC, t.id ASC
+//     `;
+
+//     const [tasks] = await pool.promise().execute(sql, params);
+
+//     // -------------------------
+//     // Task Status Counts
+//     // -------------------------
+//     const totalTasks = tasks.length;
+//     const completedCount = tasks.filter((t) => t.status === "completed").length;
+//     const blockedCount = tasks.filter((t) => t.status === "blocked").length;
+//     const inProgressCount = tasks.filter(
+//       (t) => t.status === "in_progress"
+//     ).length;
+//     const pendingCount = tasks.filter((t) =>
+//       ["todo", "in_progress", "review"].includes(t.status)
+//     ).length;
+
+//     // -------------------------
+//     // Project Lookup
+//     // -------------------------
+//     const sqlProject = `
+//       SELECT
+//           p.id AS project_id,
+//           p.name AS project_name,
+//           ptm.allocated_hours_per_week,
+//           u.username AS team_member_name
+//       FROM projects p
+//       JOIN project_team_members ptm ON p.id = ptm.project_id
+//       JOIN users u ON u.id = ptm.user_id
+//       ORDER BY p.id, u.username
+//     `;
+//     const [projects] = await pool.promise().execute(sqlProject);
+
+//     const projectLookup = {};
+//     projects.forEach((r) => {
+//       if (!projectLookup[r.project_id]) projectLookup[r.project_id] = {};
+//       projectLookup[r.project_id][r.team_member_name] = {
+//         allocated_hours_per_week: r.allocated_hours_per_week,
+//         project_name: r.project_name,
+//       };
+//     });
+
+//     // -------------------------
+//     // Grouping Output
+//     // -------------------------
+//     const output = tasks.reduce((acc, task) => {
+//       const empId = String(task.assignee_id);
+//       if (!acc[empId]) acc[empId] = [];
+
+//       const key = `${task.project_id}_${task.status}`;
+//       let existing = acc[empId].find((p) => p._key === key);
+
+//       const projectInfo = projectLookup[task.project_id]?.[task.username] || {
+//         allocated_hours_per_week: 0,
+//         project_name: "",
+//       };
+
+//       if (existing) {
+//         existing.planned_hours += Number(task.planned_hours || 0);
+//         existing.actual_hours += Number(task.actual_hours || 0);
+//       } else {
+//         acc[empId].push({
+//           _key: key,
+//           project_id: task.project_id,
+//           project_name: projectInfo.project_name,
+//           planned_hours: Number(task.planned_hours || 0),
+//           actual_hours: Number(task.actual_hours || 0),
+//           status: task.status,
+//           username: task.username,
+//           allocated_hours_per_week: projectInfo.allocated_hours_per_week || 0,
+//         });
+//       }
+//       return acc;
+//     }, {});
+
+//     Object.values(output).forEach((projects) => {
+//       projects.forEach((p) => {
+//         p.productivity_percentage =
+//           p.status === "completed"
+//             ? ((p.actual_hours / p.planned_hours) * 100).toFixed(2)
+//             : "0.00";
+//         delete p._key;
+//       });
+//     });
+
+//     // -------------------------
+//     // Weekly Helpers
+//     // -------------------------
+//     function getISOWeek(dateStr) {
+//       const d = new Date(dateStr);
+//       const year = d.getUTCFullYear();
+//       const oneJan = new Date(Date.UTC(year, 0, 1));
+//       const days = Math.floor((d - oneJan) / 86400000);
+//       const week = Math.ceil((days + oneJan.getUTCDay() + 1) / 7);
+//       return `${year}-W${week}`;
+//     }
+
+//     function getWeeksBetween(start, end) {
+//       if (!start || !end) return [];
+//       const a = new Date(start);
+//       const b = new Date(end);
+//       const seen = new Set();
+//       const weeks = [];
+//       for (let dt = new Date(a); dt <= b; dt.setDate(dt.getDate() + 1)) {
+//         const w = getISOWeek(dt.toISOString());
+//         if (!seen.has(w)) {
+//           seen.add(w);
+//           weeks.push(w);
+//         }
+//       }
+//       return weeks;
+//     }
+
+//     const weeksInRange = getWeeksBetween(startDate, endDate);
+//     const weeksCount = Math.max(weeksInRange.length, 1);
+
+//     // -------------------------
+//     // empWeekMap (per week per employee)
+//     // -------------------------
+//     const empWeekMap = {};
+//     finalEmployeeIds.forEach((id) => {
+//       empWeekMap[id] = {};
+//       weeksInRange.forEach((w) => {
+//         empWeekMap[id][w] = {
+//           planned: 0,
+//           completedPlanned: 0,
+//           completedActual: 0,
+//           completedCount: 0,
+//         };
+//       });
+//     });
+
+//     tasks.forEach((t) => {
+//       const empId = String(t.assignee_id);
+//       const week = getISOWeek(t.due_date || t.created_at || startDate);
+//       if (!empWeekMap[empId]) {
+//         empWeekMap[empId] = {};
+//       }
+//       if (!empWeekMap[empId][week]) {
+//         empWeekMap[empId][week] = {
+//           planned: 0,
+//           completedPlanned: 0,
+//           completedActual: 0,
+//           completedCount: 0,
+//         };
+//       }
+
+//       const planned = Number(t.planned_hours || 0);
+//       const actual = Number(t.actual_hours || 0);
+
+//       empWeekMap[empId][week].planned += planned;
+
+//       if (t.status === "completed") {
+//         empWeekMap[empId][week].completedPlanned += planned;
+//         empWeekMap[empId][week].completedActual += actual;
+//         empWeekMap[empId][week].completedCount += 1;
+//       }
+//     });
+
+//     // -------------------------
+//     // FINAL per employee summary
+//     // -------------------------
+//     const finalSummary = {};
+//     let overallPlannedCappedSum = 0;
+//     let overallActualUsedSum = 0;
+//     let overallAvailableSum = 0;
+
+//     let weeklyAggMap = {};
+//     weeksInRange.forEach((w) => {
+//       weeklyAggMap[w] = {
+//         planned: 0,
+//         actualUsed: 0,
+//         completed: 0,
+//         available: 0,
+//       };
+//     });
+
+//     finalEmployeeIds.forEach((empId) => {
+//       const wkMap = empWeekMap[empId];
+
+//       let empPlannedTotal = 0;
+//       let empPlannedCappedTotal = 0;
+//       let empActualUsedTotal = 0;
+//       let empAvailableTotal = 0;
+//       let empCompletedCountTotal = 0;
+
+//       weeksInRange.forEach((w) => {
+//         const wk = wkMap[w];
+
+//         const plannedWeek = wk.planned;
+//         const completedPlannedWeek = wk.completedPlanned;
+//         const completedActualWeek = wk.completedActual;
+//         const completedCountWeek = wk.completedCount;
+
+//         empPlannedTotal += plannedWeek;
+//         const cappedPlannedWeek = Math.min(plannedWeek, 40);
+//         empPlannedCappedTotal += cappedPlannedWeek;
+
+//         let actualUsedWeek = 0;
+//         if (completedCountWeek > 0) {
+//           actualUsedWeek =
+//             completedActualWeek > 0
+//               ? completedActualWeek
+//               : Math.min(completedPlannedWeek, 40);
+//         }
+//         empActualUsedTotal += actualUsedWeek;
+//         empCompletedCountTotal += completedCountWeek;
+
+//         const availableThisWeek = Math.max(0, 40 - cappedPlannedWeek);
+//         empAvailableTotal += availableThisWeek;
+
+//         weeklyAggMap[w].planned += cappedPlannedWeek;
+//         weeklyAggMap[w].actualUsed += actualUsedWeek;
+//         weeklyAggMap[w].completed += completedCountWeek;
+//         weeklyAggMap[w].available += availableThisWeek;
+//       });
+
+//       const utilization =
+//         (empPlannedCappedTotal / (40 * weeksCount)) * 100 || 0;
+
+//       const denominator = Math.min(empPlannedTotal, 40 * weeksCount);
+//       const productivity =
+//         denominator > 0 ? (empActualUsedTotal / denominator) * 100 : 0;
+
+//       finalSummary[empId] = {
+//         available_hours: empAvailableTotal,
+//         productivity: productivity.toFixed(2),
+//         utilization: utilization.toFixed(2),
+//       };
+
+//       overallPlannedCappedSum += empPlannedCappedTotal;
+//       overallActualUsedSum += empActualUsedTotal;
+//       overallAvailableSum += empAvailableTotal;
+//     });
+
+//     // -------------------------
+//     // WEEKLY CHART DATA (UPDATED UTILIZATION)
+//     // -------------------------
+//     const availabilityData = [];
+//     const productivityData = [];
+//     const utilizationData = [];
+
+//     weeksInRange.forEach((w) => {
+//       const entry = weeklyAggMap[w];
+
+//       const plannedHours = entry.planned;
+//       const hours = entry.actualUsed;
+//       const completed = entry.completed;
+//       const availableHours = entry.available;
+
+//       const productivity =
+//         plannedHours > 0 ? ((hours / plannedHours) * 100).toFixed(2) : "0";
+
+//       // ⭐ NEW FIX: Weekly Utilization = AVG(per-employee weekly utilization)
+//       let weeklyUtilSum = 0;
+//       finalEmployeeIds.forEach((empId) => {
+//         const wk = empWeekMap[empId][w] || { planned: 0 };
+//         const empPlanned = wk.planned || 0;
+//         const empCapped = Math.min(empPlanned, 40);
+//         const empUtil = (empCapped / 40) * 100;
+//         weeklyUtilSum += empUtil;
+//       });
+
+//       const utilization = (
+//         weeklyUtilSum / Math.max(finalEmployeeIds.length, 1)
+//       ).toFixed(2);
+
+//       const obj = {
+//         week: w,
+//         plannedHours,
+//         hours,
+//         completed,
+//         availableHours,
+//         productivity,
+//         utilization,
+//       };
+
+//       availabilityData.push(obj);
+//       productivityData.push(obj);
+//       utilizationData.push(obj);
+//     });
+
+//     // -------------------------
+//     // OVERALL METRICS
+//     // -------------------------
+//     const totalPlannedHours = overallPlannedCappedSum;
+//     const totalActualHours = overallActualUsedSum;
+//     const totalAvailableHours = overallAvailableSum;
+
+//     const overallProductivity =
+//       totalPlannedHours > 0
+//         ? ((totalActualHours / totalPlannedHours) * 100).toFixed(2)
+//         : "0";
+
+//     const overallUtilization = (
+//       (totalPlannedHours / (40 * finalEmployeeIds.length)) *
+//       100
+//     ).toFixed(2);
+
+//     const overallMetrics = {
+//       totalPlannedHours,
+//       totalActualHours,
+//       totalAvailableHours,
+//       productivity: overallProductivity,
+//       utilization: overallUtilization,
+//     };
+
+//     const final = {
+//       available_hours: totalAvailableHours,
+//       productivity: overallProductivity,
+//       utilization: overallUtilization,
+//     };
+
+//     // -------------------------
+//     // Send Result
+//     // -------------------------
+//     res.json({
+//       filtersUsed: { employeeIds: finalEmployeeIds, startDate, endDate },
+//       users: finalEmployeeIds,
+//       tasks,
+//       output,
+//       finalSummary,
+//       final,
+//       availabilityData,
+//       productivityData,
+//       utilizationData,
+//       overallMetrics,
+//       taskStats: {
+//         total: totalTasks,
+//         completed: completedCount,
+//         pending: pendingCount,
+//         blocked: blockedCount,
+//         in_progress: inProgressCount,
+//       },
+//     });
+//   } catch (err) {
+//     console.error(err);
+//     res.status(500).json({ error: "Server error", details: err.message });
+//   }
+// });
+
+app.post("/api/dashboard/newData", async (req, res) => {
+  try {
+    const body = req.body || {};
+    const query = req.query || {};
+
+    const employeeId = body.employeeId ?? query.employeeId;
+    const startDate = body.startDate ?? query.startDate;
+    const endDate = body.endDate ?? query.endDate;
+    const userId = body.userId ?? query.userId;
+    const userRole = body.userRole ?? query.userRole;
+
+    const parseIds = (val) =>
+      !val
+        ? []
+        : String(val)
+            .split(",")
+            .map((x) => x.trim())
+            .filter((x) => x);
+
+    // -------------------------
+    // Employee IDs
+    // -------------------------
+    let finalEmployeeIds = parseIds(employeeId);
+
+    if (!employeeId && userRole === "employee") {
+      finalEmployeeIds = [String(userId)];
+    }
+
+    if (!employeeId && userRole !== "employee") {
+      const [rows] = await pool.promise().execute(`SELECT id FROM users`);
+      finalEmployeeIds = rows.map((u) => String(u.id));
+    }
+
+    if (finalEmployeeIds.length === 0) {
+      return res.json({
+        filtersUsed: { employeeIds: finalEmployeeIds, startDate, endDate },
+        users: finalEmployeeIds,
+        tasks: [],
+        output: {},
+        finalSummary: {},
+        final: {
+          available_hours: 0,
+          productivity: "0.00",
+          utilization: "0.00",
+        },
+        availabilityData: [],
+        productivityData: [],
+        utilizationData: [],
+        overallMetrics: {
+          totalPlannedHours: 0,
+          totalActualHours: 0,
+          totalAvailableHours: 0,
+          productivity: "0.00",
+          utilization: "0.00",
+        },
+        taskStats: {
+          total: 0,
+          completed: 0,
+          pending: 0,
+          blocked: 0,
+          in_progress: 0,
+        },
+      });
+    }
+
+    // -------------------------
+    // Fetch Tasks
+    // -------------------------
+    let where = [
+      `t.assignee_id IN (${finalEmployeeIds.map(() => "?").join(",")})`,
+    ];
+    const params = [...finalEmployeeIds];
+
+    if (startDate) {
+      where.push("DATE(t.due_date) >= ?");
+      params.push(startDate);
+    }
+    if (endDate) {
+      where.push("DATE(t.due_date) <= ?");
+      params.push(endDate);
+    }
+
+    const sql = `
+      SELECT 
+        t.*,
+        u.username,
+        COALESCE(u.available_hours_per_week, 40) AS available_hours_per_week
+      FROM tasks t
+      JOIN users u ON u.id = t.assignee_id
+      WHERE ${where.join(" AND ")}
+      ORDER BY t.due_date ASC, t.id ASC
+    `;
+
+    const [tasks] = await pool.promise().execute(sql, params);
+
+    // -------------------------
+    // Task Status Counts
+    // -------------------------
+    const totalTasks = tasks.length;
+    const completedCount = tasks.filter((t) => t.status === "completed").length;
+    const blockedCount = tasks.filter((t) => t.status === "blocked").length;
+    const inProgressCount = tasks.filter(
+      (t) => t.status === "in_progress"
+    ).length;
+    const pendingCount = tasks.filter((t) =>
+      ["todo", "in_progress", "review"].includes(t.status)
+    ).length;
+
+    // -------------------------
+    // Project Lookup
+    // -------------------------
+    const sqlProject = `
+      SELECT 
+          p.id AS project_id,
+          p.name AS project_name,
+          ptm.allocated_hours_per_week,
+          u.username AS team_member_name
+      FROM projects p
+      JOIN project_team_members ptm ON p.id = ptm.project_id
+      JOIN users u ON u.id = ptm.user_id
+      ORDER BY p.id, u.username
+    `;
+    const [projects] = await pool.promise().execute(sqlProject);
+
+    const projectLookup = {};
+    projects.forEach((r) => {
+      if (!projectLookup[r.project_id]) projectLookup[r.project_id] = {};
+      projectLookup[r.project_id][r.team_member_name] = {
+        allocated_hours_per_week: r.allocated_hours_per_week,
+        project_name: r.project_name,
+      };
+    });
+
+    // -------------------------
+    // Grouping Output
+    // -------------------------
+    const output = tasks.reduce((acc, task) => {
+      const empId = String(task.assignee_id);
+      if (!acc[empId]) acc[empId] = [];
+
+      const key = `${task.project_id}_${task.status}`;
+      let existing = acc[empId].find((p) => p._key === key);
+
+      const projectInfo = projectLookup[task.project_id]?.[task.username] || {
+        allocated_hours_per_week: 0,
+        project_name: "",
+      };
+
+      if (existing) {
+        existing.planned_hours += Number(task.planned_hours || 0);
+        existing.actual_hours += Number(task.actual_hours || 0);
+      } else {
+        acc[empId].push({
+          _key: key,
+          project_id: task.project_id,
+          project_name: projectInfo.project_name,
+          planned_hours: Number(task.planned_hours || 0),
+          actual_hours: Number(task.actual_hours || 0),
+          status: task.status,
+          username: task.username,
+          allocated_hours_per_week: projectInfo.allocated_hours_per_week || 0,
+        });
+      }
+      return acc;
+    }, {});
+
+    Object.values(output).forEach((projects) => {
+      projects.forEach((p) => {
+        p.productivity_percentage =
+          p.status === "completed"
+            ? ((p.actual_hours / p.planned_hours) * 100).toFixed(2)
+            : "0.00";
+        delete p._key;
+      });
+    });
+
+    // -------------------------
+    // Weekly Helpers
+    // -------------------------
+    function getISOWeek(dateStr) {
+      const d = new Date(dateStr);
+      const year = d.getUTCFullYear();
+      const oneJan = new Date(Date.UTC(year, 0, 1));
+      const days = Math.floor((d - oneJan) / 86400000);
+      const week = Math.ceil((days + oneJan.getUTCDay() + 1) / 7);
+      return `${year}-W${week}`;
+    }
+
+    function getWeeksBetween(start, end) {
+      if (!start || !end) return [];
+      const a = new Date(start);
+      const b = new Date(end);
+      const seen = new Set();
+      const weeks = [];
+      for (let dt = new Date(a); dt <= b; dt.setDate(dt.getDate() + 1)) {
+        const w = getISOWeek(dt.toISOString());
+        if (!seen.has(w)) {
+          seen.add(w);
+          weeks.push(w);
+        }
+      }
+      return weeks;
+    }
+
+    const weeksInRange = getWeeksBetween(startDate, endDate);
+    const weeksCount = Math.max(weeksInRange.length, 1);
+
+    // -------------------------
+    // empWeekMap (per week per employee)
+    // -------------------------
+    const empWeekMap = {};
+    finalEmployeeIds.forEach((id) => {
+      empWeekMap[id] = {};
+      weeksInRange.forEach((w) => {
+        empWeekMap[id][w] = {
+          planned: 0,
+          completedPlanned: 0,
+          completedActual: 0,
+          completedCount: 0,
+        };
+      });
+    });
+
+    tasks.forEach((t) => {
+      const empId = String(t.assignee_id);
+      const week = getISOWeek(t.due_date || t.created_at || startDate);
+      if (!empWeekMap[empId]) {
+        empWeekMap[empId] = {};
+      }
+      if (!empWeekMap[empId][week]) {
+        empWeekMap[empId][week] = {
+          planned: 0,
+          completedPlanned: 0,
+          completedActual: 0,
+          completedCount: 0,
+        };
+      }
+
+      const planned = Number(t.planned_hours || 0);
+      const actual = Number(t.actual_hours || 0);
+
+      empWeekMap[empId][week].planned += planned;
+
+      if (t.status === "completed") {
+        empWeekMap[empId][week].completedPlanned += planned;
+        empWeekMap[empId][week].completedActual += actual;
+        empWeekMap[empId][week].completedCount += 1;
+      }
+    });
+
+    // -------------------------
+    // FINAL per employee summary
+    // -------------------------
+    const finalSummary = {};
+    let overallPlannedCappedSum = 0;
+    let overallActualUsedSum = 0;
+    let overallAvailableSum = 0;
+
+    let weeklyAggMap = {};
+    weeksInRange.forEach((w) => {
+      weeklyAggMap[w] = {
+        planned: 0,
+        actualUsed: 0,
+        completed: 0,
+        available: 0,
+      };
+    });
+
+    finalEmployeeIds.forEach((empId) => {
+      const wkMap = empWeekMap[empId];
+
+      let empPlannedTotal = 0;
+      let empPlannedCappedTotal = 0;
+      let empActualUsedTotal = 0;
+      let empAvailableTotal = 0;
+      let empCompletedCountTotal = 0;
+
+      weeksInRange.forEach((w) => {
+        const wk = wkMap[w];
+
+        const plannedWeek = wk.planned;
+        const completedPlannedWeek = wk.completedPlanned;
+        const completedActualWeek = wk.completedActual;
+        const completedCountWeek = wk.completedCount;
+
+        empPlannedTotal += plannedWeek;
+        const cappedPlannedWeek = Math.min(plannedWeek, 40);
+        empPlannedCappedTotal += cappedPlannedWeek;
+
+        let actualUsedWeek = 0;
+        if (completedCountWeek > 0) {
+          actualUsedWeek =
+            completedActualWeek > 0
+              ? completedActualWeek
+              : Math.min(completedPlannedWeek, 40);
+        }
+        empActualUsedTotal += actualUsedWeek;
+        empCompletedCountTotal += completedCountWeek;
+
+        const availableThisWeek = Math.max(0, 40 - cappedPlannedWeek);
+        empAvailableTotal += availableThisWeek;
+
+        weeklyAggMap[w].planned += cappedPlannedWeek;
+        weeklyAggMap[w].actualUsed += actualUsedWeek;
+        weeklyAggMap[w].completed += completedCountWeek;
+        weeklyAggMap[w].available += availableThisWeek;
+      });
+
+      const utilization =
+        (empPlannedCappedTotal / (40 * weeksCount)) * 100 || 0;
+
+      const denominator = Math.min(empPlannedTotal, 40 * weeksCount);
+      const productivity =
+        denominator > 0 ? (empActualUsedTotal / denominator) * 100 : 0;
+
+      finalSummary[empId] = {
+        available_hours: empAvailableTotal,
+        productivity: productivity.toFixed(2),
+        utilization: utilization.toFixed(2),
+      };
+
+      overallPlannedCappedSum += empPlannedCappedTotal;
+      overallActualUsedSum += empActualUsedTotal;
+      overallAvailableSum += empAvailableTotal;
+    });
+
+    // -------------------------
+    // WEEKLY CHART DATA (UPDATED UTILIZATION)
+    // -------------------------
+    const availabilityData = [];
+    const productivityData = [];
+    const utilizationData = [];
+
+    weeksInRange.forEach((w) => {
+      const entry = weeklyAggMap[w];
+
+      const plannedHours = entry.planned;
+      const hours = entry.actualUsed;
+      const completed = entry.completed;
+      const availableHours = entry.available;
+
+      const productivity =
+        plannedHours > 0 ? ((hours / plannedHours) * 100).toFixed(2) : "0";
+
+      // ⭐ NEW FIX: Weekly Utilization = AVG(per-employee weekly utilization)
+      let weeklyUtilSum = 0;
+      finalEmployeeIds.forEach((empId) => {
+        const wk = empWeekMap[empId][w] || { planned: 0 };
+        const empPlanned = wk.planned || 0;
+        const empCapped = Math.min(empPlanned, 40);
+        const empUtil = (empCapped / 40) * 100;
+        weeklyUtilSum += empUtil;
+      });
+
+      const utilization = (
+        weeklyUtilSum / Math.max(finalEmployeeIds.length, 1)
+      ).toFixed(2);
+
+      const obj = {
+        week: w,
+        plannedHours,
+        hours,
+        completed,
+        availableHours,
+        productivity,
+        utilization,
+      };
+
+      availabilityData.push(obj);
+      productivityData.push(obj);
+      utilizationData.push(obj);
+    });
+
+    // -------------------------
+    // OVERALL METRICS
+    // -------------------------
+    const totalPlannedHours = overallPlannedCappedSum;
+    const totalActualHours = overallActualUsedSum;
+    const totalAvailableHours = overallAvailableSum;
+
+    const overallProductivity =
+      totalPlannedHours > 0
+        ? ((totalActualHours / totalPlannedHours) * 100).toFixed(2)
+        : "0";
+
+    // ★ Correct Overall Utilization = Average of weekly utilization
+    let sumWeeklyUtil = 0;
+
+    utilizationData.forEach((u) => {
+      sumWeeklyUtil += Number(u.utilization);
+    });
+
+    const overallUtilization = (
+      sumWeeklyUtil / Math.max(utilizationData.length, 1)
+    ).toFixed(2);
+
+    const overallMetrics = {
+      totalPlannedHours,
+      totalActualHours,
+      totalAvailableHours,
+      productivity: overallProductivity,
+      utilization: overallUtilization,
+    };
+
+    const final = {
+      available_hours: totalAvailableHours,
+      productivity: overallProductivity,
+      utilization: overallUtilization,
+    };
+
+    // -------------------------
+    // Send Result
+    // -------------------------
+    res.json({
+      filtersUsed: { employeeIds: finalEmployeeIds, startDate, endDate },
+      users: finalEmployeeIds,
+      tasks,
+      output,
+      finalSummary,
+      final,
+      availabilityData,
+      productivityData,
+      utilizationData,
+      overallMetrics,
+      taskStats: {
+        total: totalTasks,
+        completed: completedCount,
+        pending: pendingCount,
+        blocked: blockedCount,
+        in_progress: inProgressCount,
+      },
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Server error", details: err.message });
+  }
+});
 app.get("/api/dashboard/projects", (req, res) => {
   const { userId, userRole } = req.query;
 
@@ -5925,16 +6793,15 @@ app.post("/api/tasks/validate-workload", (req, res) => {
                   ? (totalWorkload / totalAllocatedHours) * 100
                   : 0;
 
-              // Determine warning level
-              let warningLevel = "none";
-              let warnings = [];
-
               // Calculate available hours AFTER adding the new task
               const remainingAvailableHoursAfter = Math.max(
                 0,
                 availableHoursPerWeek - totalWorkload
               );
-              const availableHoursPercentage = (remainingAvailableHoursAfter / totalCapacityPerWeek) * 100;
+
+              // Determine warning level
+              let warningLevel = "none";
+              let warnings = [];
 
               if (utilizationPercentage > 100) {
                 warningLevel = "critical";
