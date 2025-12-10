@@ -5501,11 +5501,11 @@ app.post("/api/dashboard/newData", async (req, res) => {
     // Send Result
     // -------------------------
     res.json({
-      filtersUsed: { employeeIds: finalEmployeeIds, startDate, endDate },
-      users: finalEmployeeIds,
+      // filtersUsed: { employeeIds: finalEmployeeIds, startDate, endDate },
+      // users: finalEmployeeIds,
       tasks,
-      output,
-      finalSummary,
+      // output,
+      // finalSummary,
       final,
       availabilityData,
       productivityData,
