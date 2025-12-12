@@ -5191,6 +5191,7 @@ app.post("/api/dashboard/newData", async (req, res) => {
     const inProgressCount = tasks.filter(
       (t) => t.status === "in_progress"
     ).length;
+    const todoCount = tasks.filter((t) => t.status === "todo").length;
     const pendingCount = tasks.filter((t) =>
       ["todo", "in_progress", "review"].includes(t.status)
     ).length;
@@ -5517,6 +5518,7 @@ app.post("/api/dashboard/newData", async (req, res) => {
         pending: pendingCount,
         blocked: blockedCount,
         in_progress: inProgressCount,
+        todo: todoCount,
       },
     });
   } catch (err) {
