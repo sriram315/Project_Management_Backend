@@ -5093,6 +5093,7 @@ app.post("/api/dashboard/newData", async (req, res) => {
     const query = req.query || {};
 
     const employeeId = body.employeeId ?? query.employeeId;
+    const projectId = body.projectId ?? query.projectId;
     const startDate = body.startDate ?? query.startDate;
     const endDate = body.endDate ?? query.endDate;
     const userId = body.userId ?? query.userId;
@@ -5105,6 +5106,49 @@ app.post("/api/dashboard/newData", async (req, res) => {
             .split(",")
             .map((x) => x.trim())
             .filter((x) => x);
+
+    // -------------------------
+    // Project IDs
+    // -------------------------
+    const finalProjectIds = parseIds(projectId);
+
+    // If projectId was provided but parsed to empty, return empty result to avoid leaking other projects
+    if (projectId && finalProjectIds.length === 0) {
+      return res.json({
+        filtersUsed: {
+          projectIds: finalProjectIds,
+          employeeIds: [],
+          startDate,
+          endDate,
+        },
+        users: [],
+        tasks: [],
+        output: {},
+        finalSummary: {},
+        final: {
+          available_hours: 0,
+          productivity: "0.00",
+          utilization: "0.00",
+        },
+        availabilityData: [],
+        productivityData: [],
+        utilizationData: [],
+        overallMetrics: {
+          totalPlannedHours: 0,
+          totalActualHours: 0,
+          totalAvailableHours: 0,
+          productivity: "0.00",
+          utilization: "0.00",
+        },
+        taskStats: {
+          total: 0,
+          completed: 0,
+          pending: 0,
+          blocked: 0,
+          in_progress: 0,
+        },
+      });
+    }
 
     // -------------------------
     // Employee IDs
@@ -5122,7 +5166,12 @@ app.post("/api/dashboard/newData", async (req, res) => {
 
     if (finalEmployeeIds.length === 0) {
       return res.json({
-        filtersUsed: { employeeIds: finalEmployeeIds, startDate, endDate },
+        filtersUsed: {
+          projectIds: finalProjectIds,
+          employeeIds: finalEmployeeIds,
+          startDate,
+          endDate,
+        },
         users: finalEmployeeIds,
         tasks: [],
         output: {},
@@ -5159,6 +5208,12 @@ app.post("/api/dashboard/newData", async (req, res) => {
       `t.assignee_id IN (${finalEmployeeIds.map(() => "?").join(",")})`,
     ];
     const params = [...finalEmployeeIds];
+
+    // Apply project filter when provided
+    if (finalProjectIds.length > 0) {
+      where.push(`t.project_id IN (${finalProjectIds.map(() => "?").join(",")})`);
+      params.push(...finalProjectIds);
+    }
 
     if (startDate) {
       where.push("DATE(t.due_date) >= ?");
