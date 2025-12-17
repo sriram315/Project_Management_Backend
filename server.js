@@ -5155,11 +5155,26 @@ app.post("/api/dashboard/newData", async (req, res) => {
     // -------------------------
     let finalEmployeeIds = parseIds(employeeId);
 
-    if (!employeeId && userRole === "employee") {
-      finalEmployeeIds = [String(userId)];
+    // If a project filter is provided and no explicit employee filter, scope employees to that project's team
+    let projectTeamMemberIds = [];
+    if (finalProjectIds.length > 0) {
+      const placeholders = finalProjectIds.map(() => "?").join(",");
+      const [ptmRows] = await pool
+        .promise()
+        .execute(
+          `SELECT DISTINCT user_id FROM project_team_members WHERE project_id IN (${placeholders})`,
+          finalProjectIds
+        );
+      projectTeamMemberIds = ptmRows.map((r) => String(r.user_id));
     }
 
-    if (!employeeId && userRole !== "employee") {
+    if (!employeeId && userRole === "employee") {
+      finalEmployeeIds = [String(userId)];
+    } else if (!employeeId && finalProjectIds.length > 0) {
+      // No employee filter, but project filter present -> use that project's team
+      finalEmployeeIds = projectTeamMemberIds;
+    } else if (!employeeId && userRole !== "employee") {
+      // No filters at all -> fall back to all users
       const [rows] = await pool.promise().execute(`SELECT id FROM users`);
       finalEmployeeIds = rows.map((u) => String(u.id));
     }
