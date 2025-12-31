@@ -5337,14 +5337,32 @@ app.post("/api/dashboard/newData", async (req, res) => {
     // -------------------------
     // Weekly Helpers
     // -------------------------
-    function getISOWeek(dateStr) {
-      const d = new Date(dateStr);
-      const year = d.getUTCFullYear();
-      const oneJan = new Date(Date.UTC(year, 0, 1));
-      const days = Math.floor((d - oneJan) / 86400000);
-      const week = Math.ceil((days + oneJan.getUTCDay() + 1) / 7);
-      return `${year}-W${week}`;
-    }
+    // function getISOWeek(dateStr) {
+    //   const d = new Date(dateStr);
+    //   const year = d.getUTCFullYear();
+    //   const oneJan = new Date(Date.UTC(year, 0, 1));
+    //   const days = Math.floor((d - oneJan) / 86400000);
+    //   const week = Math.ceil((days + oneJan.getUTCDay() + 1) / 7);
+    //   return `${year}-W${week}`;
+    // }
+    function getISOWeek(dateInput) {
+  const d = new Date(dateInput);
+  d.setUTCHours(0, 0, 0, 0);
+
+  // Thursday determines the ISO year
+  d.setUTCDate(d.getUTCDate() + 3 - ((d.getUTCDay() + 6) % 7));
+
+  const isoYear = d.getUTCFullYear();
+
+  const week1 = new Date(Date.UTC(isoYear, 0, 4));
+  const week =
+    1 +
+    Math.round(
+      ((d - week1) / 86400000 - 3 + ((week1.getUTCDay() + 6) % 7)) / 7
+    );
+
+  return `${isoYear}-W${week}`;
+}
 
     function getWeeksBetween(start, end) {
       if (!start || !end) return [];
