@@ -6688,6 +6688,8 @@ app.get("/api/dashboard/tasks-timeline", (req, res) => {
           statusColor,
           estimated: Number(row.estimated) || 0,
           logged: Number(row.logged) || 0,
+          planned_hours: Number(row.estimated) || 0,
+          actual_hours: Number(row.logged) || 0,
           due_date: row.due_date || null,
         };
       };
